@@ -477,6 +477,30 @@ namespace SafeHook
 		float f32;
 	} REG;
 
+	typedef union
+	{
+		struct
+		{
+			unsigned short CF : 1;
+			unsigned short BRKI : 1;
+			unsigned short PF : 1;
+			unsigned short Reserved1 : 1;
+			unsigned short AF : 1;
+			unsigned short Reserved2 : 1;
+			unsigned short ZF : 1;
+			unsigned short SF : 1;
+
+			unsigned short TF : 1;
+			unsigned short IF : 1;
+			unsigned short DF : 1;
+			unsigned short OF : 1;
+			unsigned short IOPL : 2;
+			unsigned short NT : 1;
+			unsigned short MD : 1;
+		}; // no more flags since pushfd only stores the lower 16 bits of EFLAGS
+		unsigned short i16;
+	} EFLAGS;
+
 	typedef struct FPUREG
 	{
 	private: // we shouldn't be really exposed to "internals" so let's just hide it and provide a way to convert to/from double, which is what most people would want to use
@@ -597,7 +621,7 @@ namespace SafeHook
 		REG ebp;
 
 		REG& eax() { return *(REG*)(saved_esp.i32); }
-		REG& eflags() { return *(REG*)(saved_esp.i32 + 4); }
+		EFLAGS& eflags() { return *(EFLAGS*)(saved_esp.i32 + 4); }
 
 		XMMREG& xmm(int i _In_range_(0, 7)) { return FPUandSSE.xmm[i]; }
 		FPUREG& st(int i _In_range_(0, 7)) { return FPUandSSE.FPU.st[i]; }
