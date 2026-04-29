@@ -281,6 +281,18 @@ namespace SafeHook
 		WriteObject(src + 1, MakeRelativeOffsetIMM32(src, dst));
 	}
 
+	inline void MakeNOP(uintptr_t address, size_t size)
+	{
+		scoped_unprotect unprotect(address, size);
+
+		memset((void*)address, 0x90, size);
+	}
+
+	inline void MakeRangedNOP(uintptr_t src, uintptr_t dst)
+	{
+		MakeNOP(src, dst - src);
+	}
+
 	// Used to make a trampoline in dst, if the dst is null it will calculate how much bytes is the src
 	inline size_t CreateTrampoline(unsigned char* src, unsigned char* dst = nullptr, size_t *tramp_size = nullptr)
 	{
@@ -382,6 +394,7 @@ namespace SafeHook
 						memcpy(dst + writeOffset, src + offset, disasm.len);
 						writeOffset += disasm.len;
 					}
+					break;
 				}
 				default:
 					memcpy(dst + offset, src + offset, disasm.len);
@@ -743,7 +756,7 @@ namespace SafeHook
 
 			size_t original_size = CreateTrampoline((unsigned char*)_address, nullptr);
 
-			this->trampoline = (unsigned char*)g_pageController.allocate(original_size + 10, 0x100); // +5 for jmp and call
+			this->trampoline = (unsigned char*)g_pageController.allocate(original_size + 10, 0x100); // +5 for jmp and call each
 			
 			if (!this->trampoline)
 			{
