@@ -1,5 +1,12 @@
 #pragma once
-#include <Windows.h>
+
+#if defined(_MSC_VER)
+	#include <Windows.h>
+#elif defined(__MINGW32__)
+	#include <windows.h>
+#else
+	#error "No can't do without Windows.h"
+#endif
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
 #define SAFEHOOK_X64 1
@@ -9,11 +16,20 @@
 #define SAFEHOOK_X64 0
 #endif
 
-#if SAFEHOOK_X64
-#include "hde/hde64.h"
+#if defined(_MSC_VER)
+	#define FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+	#define FORCEINLINE inline __attribute__((always_inline))
 #else
-#include "hde/hde32.h"
+	#define FORCEINLINE inline
 #endif
+
+#if SAFEHOOK_X64
+	#include "hde/hde64.h"
+#else
+	#include "hde/hde32.h"
+#endif
+
 #include <assert.h>
 #include <new>
 #include <stdio.h>
@@ -1140,8 +1156,24 @@ namespace SafeHook
 		unsigned int i32;
 		unsigned short i16;
 		unsigned char i8;
+
 		float f32;
 		double f64;
+
+		unsigned char* pi8;
+		unsigned short* pi16;
+		unsigned int* pi32;
+		unsigned __int64* pi64;
+
+		float* pf32;
+		double* pf64;
+
+		FORCEINLINE void Set(unsigned char i8) { i64 = 0LL;  this->i8 = i8; }
+		FORCEINLINE void Set(unsigned short i16) { i64 = 0LL; this->i16 = i16; }
+		FORCEINLINE void Set(unsigned int i32) { i64 = 0LL; this->i32 = i32; }
+		FORCEINLINE void Set(unsigned __int64 i64) { this->i64 = i64; }
+		FORCEINLINE void Set(float f32) { i64 = 0LL; this->f32 = f32; }
+		FORCEINLINE void Set(double f64) { this->f64 = f64; } // we don't have to clear out i64, already replaced by f64
 	} REG;
 #else
 	typedef union
@@ -1151,6 +1183,17 @@ namespace SafeHook
 		unsigned char i8;
 
 		float f32;
+
+		unsigned char* pi8;
+		unsigned short* pi16;
+		unsigned int* pi32;
+
+		float* pf32;
+
+		FORCEINLINE void Set(unsigned char i8) { i32 = 0; this->i8 = i8; } 
+		FORCEINLINE void Set(unsigned short i16) { i32 = 0; this->i16 = i16; }
+		FORCEINLINE void Set(unsigned int i32) { this->i32 = i32; }
+		FORCEINLINE void Set(float f32) { this->f32 = f32; }
 	} REG;
 #endif
 
@@ -1331,7 +1374,7 @@ namespace SafeHook
 
 		REG& eax() { return *(REG*)(saved_esp.i32); }
 		EFLAGS& eflags() { return *(EFLAGS*)(saved_esp.i32 + 4); }
-		const REG& esp() const { return (REG)(saved_esp.i32 + 0xC); } // you are not allowed to modify stack pointer
+		const REG esp() const { return (REG)(saved_esp.i32 + 0xC); } // you are not allowed to modify stack pointer
 
 		XMMREG& xmm(int i _In_range_(0, 7)) { return FPUandSSE.xmm[i]; }
 		FPUREG& st(int i _In_range_(0, 7)) { return FPUandSSE.FPU.st[i]; }
