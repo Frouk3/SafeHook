@@ -1150,7 +1150,7 @@ namespace SafeHook
 	};
 
 #if SAFEHOOK_X64
-	typedef union
+	union REG
 	{
 		unsigned __int64 i64;
 		unsigned int i32;
@@ -1176,7 +1176,7 @@ namespace SafeHook
 		FORCEINLINE void Set(double f64) { this->f64 = f64; } // we don't have to clear out i64, already replaced by f64
 	} REG;
 #else
-	typedef union
+	union REG
 	{
 		unsigned int i32;
 		unsigned short i16;
@@ -1194,7 +1194,7 @@ namespace SafeHook
 		FORCEINLINE void Set(unsigned short i16) { i32 = 0; this->i16 = i16; }
 		FORCEINLINE void Set(unsigned int i32) { this->i32 = i32; }
 		FORCEINLINE void Set(float f32) { this->f32 = f32; }
-	} REG;
+	};
 #endif
 
 	typedef union
