@@ -9,19 +9,29 @@
 #endif
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
-#define SAFEHOOK_X64 1
-#define SAFEHOOK_X86 0
+	#define SAFEHOOK_X64 1
+	#define SAFEHOOK_X86 0
+	#define SAFEHOOK_BY_ARCH(x86, x64) x64
 #else
-#define SAFEHOOK_X86 1
-#define SAFEHOOK_X64 0
+	#define SAFEHOOK_X86 1
+	#define SAFEHOOK_X64 0
+	#define SAFEHOOK_BY_ARCH(x86, x64) x86
 #endif
 
 #if defined(_MSC_VER)
-	#define FORCEINLINE __forceinline
+	#define SAFEHOOK_FORCEINLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
-	#define FORCEINLINE inline __attribute__((always_inline))
+	#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
 #else
-	#define FORCEINLINE inline
+	#define SAFEHOOK_FORCEINLINE inline
+#endif
+
+#if defined(_MSC_VER)
+	#define ALIGNAS(x) __declspec(align(x))
+#elif defined(__GNUC__) || defined(__clang__)
+	#define ALIGNAS(x) __attribute__((aligned(x)))
+#else
+	#define ALIGNAS(x)
 #endif
 
 #if SAFEHOOK_X64
@@ -249,6 +259,8 @@ namespace SafeHook
 
 #define SAFEHOOK_THROW(msg) throw SafeHook::Exception(msg, __FILE__, __LINE__)
 #define SAFEHOOK_THROW_FORMAT(msg, ...) do { SafeHook::Exception except(nullptr, __FILE__, __LINE__); except.DoFormat(msg, __VA_ARGS__); throw except; } while(0)
+// Also reports function where the exception was thrown, and the line number
+#define SAFEHOOK_REPORT_HERE(msg, ...) SAFEHOOK_THROW_FORMAT(__FUNCTION__ ## ": " ## msg, __VA_ARGS__)
 
 #define CHECK_ERROR(disasm) if (disasm.flags & F_ERROR) \
 	{													\
@@ -310,6 +322,9 @@ namespace SafeHook
 
 	inline bool CheckValidAddress(SafeAddress address)
 	{
+		if (!address.get())
+			return false;
+		
 		MEMORY_BASIC_INFORMATION mbi;
 		if (VirtualQuery((LPCVOID)address.get(), &mbi, sizeof(mbi)) == 0)
 			return false;
@@ -604,37 +619,37 @@ namespace SafeHook
 	class scoped_unprotect
 	{
 		DWORD old_protect;
-		size_t address;
+		SafeAddress address;
 		size_t size;
 	public:
-		scoped_unprotect() : old_protect(0), address(0), size(0) {}
+		scoped_unprotect() : old_protect(0), address(uintptr_t(0)), size(0) {}
 
-		void protect(size_t address, size_t size)
+		void protect(SafeAddress address, size_t size)
 		{
-			if (!address || !size)
+			if (!address.get() || !size)
 			{
-				if (!address) SAFEHOOK_THROW("Cannot operate on null address!");
+				if (!address.get()) SAFEHOOK_THROW("Cannot operate on null address!");
 				else if (!size) SAFEHOOK_THROW("Cannot operate on zero size!");
 			}
 
-			if (this->address && this->size)
-				VirtualProtect((LPVOID)this->address, this->size, old_protect, &old_protect);
+			if (this->address.get() && this->size)
+				VirtualProtect((LPVOID)this->address.get(), this->size, old_protect, &old_protect);
 
 			this->address = address;
 			this->size = size;
-			VirtualProtect((LPVOID)address, size, PAGE_EXECUTE_READWRITE, &old_protect);
+			VirtualProtect((LPVOID)address.get(), size, PAGE_EXECUTE_READWRITE, &old_protect);
 		}
 
 		void unprotect()
 		{
-			if (this->address && this->size)
-				VirtualProtect((LPVOID)this->address, this->size, old_protect, &old_protect);
+			if (this->address.get() && this->size)
+				VirtualProtect((LPVOID)this->address.get(), this->size, old_protect, &old_protect);
 
-			this->address = 0;
+			this->address = uintptr_t(0);
 			this->size = 0;
 		}
 
-		scoped_unprotect(size_t address, size_t size)
+		scoped_unprotect(SafeAddress address, size_t size)
 		{
 			protect(address, size);
 		}
@@ -689,6 +704,68 @@ namespace SafeHook
 		memcpy((void*)address.get(), data, size);
 	}
 
+	class scoped_backup
+	{
+		SafeAddress address;
+		size_t size;
+		unsigned char* backup;
+	public:
+		scoped_backup() : address(uintptr_t(0)), size(0), backup(nullptr) {}
+
+		scoped_backup(SafeAddress address, size_t size) : address(address), size(size)
+		{
+			store(address, size);
+		}
+
+		~scoped_backup()
+		{
+			restore();
+			if (backup)
+			{
+				delete[] backup;
+				backup = nullptr;
+			}
+		}
+
+		void store(SafeAddress address, size_t size)
+		{
+			if (!address.get() || !size)
+			{
+				if (!address.get()) SAFEHOOK_THROW("Cannot operate on null address!");
+				else if (!size) SAFEHOOK_THROW("Cannot operate on zero size!");
+			}
+
+			if (backup)
+				delete[] backup;
+
+			this->address = address;
+			this->size = size;
+
+			backup = new unsigned char[size];
+			memcpy(backup, (void*)address.get(), size);
+		}
+
+		void restore(bool bCheck = true)
+		{
+			if (backup)
+			{
+				if (bCheck)
+				{
+					if (!CheckValidAddress(address))
+						return;
+				}
+				
+				scoped_unprotect unprotect(address.get(), size);
+				WriteMemoryRaw(address, backup, size);
+			}
+		}
+
+		bool empty() const { return !address.get() || !size || !backup; }
+
+		friend class Hook;
+	};
+
+	// Unfortunately does not work for jmp/call far [rip+0] instructions
 	inline uintptr_t GetBranchDestination(SafeAddress address)
 	{
 		hde_s disasm = { 0 };
@@ -787,7 +864,7 @@ namespace SafeHook
 				WriteMemory<unsigned char>(src + 1, 0x25);
 				WriteMemory<unsigned int>(src + 2, 0);
 
-				WriteMemory<uint64_t>(src + 6, MakeRelativeOffsetIMM64(src, dst));
+				WriteMemory<uint64_t>(src + 6, dst.get());
 				break;
 			}
 #endif
@@ -807,7 +884,7 @@ namespace SafeHook
 		switch (typeSize)
 		{
 			case sizeof(uint8_t) :
-				case sizeof(uint32_t) :
+			case sizeof(uint32_t) :
 			{
 				WriteMemory<unsigned char>(src, 0xE8);
 				WriteMemory<unsigned int>(src + 1, MakeRelativeOffsetIMM32(src, dst));
@@ -820,7 +897,7 @@ namespace SafeHook
 				WriteMemory<unsigned char>(src + 1, 0x15);
 				WriteMemory<unsigned int>(src + 2, 0); // CALL [RIP+0]
 
-				WriteMemory<uint64_t>(src + 6, MakeRelativeOffsetIMM64(src, dst));
+				WriteMemory<uint64_t>(src + 6, dst.get());
 
 				break;
 			}
@@ -857,6 +934,63 @@ namespace SafeHook
 		}
 	}
 
+	inline size_t GetTrampolineSize(SafeAddress src) // cannot really depend on trampoline placement here...
+	{
+		hde_s disasm = { 0 };
+		size_t readOffs = 0;
+		size_t size = 0;
+
+		while (readOffs < g_JmpInstructionSize)
+		{
+			HDE_DISASM((unsigned char*)src.get() + readOffs, &disasm);
+			CHECK_ERROR(disasm);
+
+			unsigned char *p = (unsigned char*)src.get() + readOffs;
+			if ((*p >= 0x70 && *p <= 0x7F))
+			{
+				size += 6; // jcc rel8 -> jcc rel32
+#if SAFEHOOK_X64
+				if (GetDistanceTypeSize(src + readOffs, src + readOffs + 6) == sizeof(uint64_t))
+					SAFEHOOK_REPORT_HERE("Jcc does not support 64-bit relative offsets!");
+#endif
+			}
+			else if (*p == 0xE9 || *p == 0xE8)
+			{
+				size += SAFEHOOK_BY_ARCH(5, 14);
+			}
+			else if (*p == 0xEB)
+			{
+				size += SAFEHOOK_BY_ARCH(5, 14);
+			}
+			else
+			{
+				size += disasm.len;
+			}
+
+			readOffs += disasm.len;
+		}
+
+		return size;
+	}
+
+	inline size_t GetByteCodeLength(unsigned char* src, size_t minLength)
+	{
+		hde_s disasm = { 0 };
+		size_t readOffs = 0;
+		size_t size = 0;
+
+		while (size < minLength)
+		{
+			HDE_DISASM(src + readOffs, &disasm);
+			CHECK_ERROR(disasm);
+
+			size += disasm.len;
+			readOffs += disasm.len;
+		}
+
+		return size;
+	}
+
 	// Used to make a trampoline in dst, if the dst is null it will calculate how much bytes is the src
 	inline size_t CreateTrampoline(unsigned char* src, unsigned char* dst = nullptr, size_t* tramp_size = nullptr)
 	{
@@ -864,7 +998,8 @@ namespace SafeHook
 		size_t writeOffs = 0;
 		size_t readOffs = 0;
 
-		scoped_unprotect unprotect((size_t)src, 32); // unprotect the source memory so we can read and write to it safely
+		// scoped_unprotect unprotect((size_t)src, 32); // unprotect the source memory so we can read and write to it safely
+		// pretty sure that page is already available for reading, so commenting this out for now
 
 		size_t jmpInstruction = 0;
 		switch (GetDistanceTypeSize(src, dst))
@@ -891,15 +1026,7 @@ namespace SafeHook
 
 		if (!dst)
 		{
-			while (writeOffs < jmpInstruction)
-			{
-				HDE_DISASM(src + readOffs, &disasm);
-				CHECK_ERROR(disasm);
-
-				writeOffs += disasm.len;
-				readOffs += disasm.len;
-			}
-			return writeOffs;
+			return GetTrampolineSize(src);
 		}
 		else
 		{
@@ -1029,22 +1156,18 @@ namespace SafeHook
 			};
 		} m_state;
 		unsigned char* m_trampoline;
-		unsigned char* m_originalBytes;
-		size_t m_originalSize;
+		scoped_backup m_originalBytes;
 
 		void CreateTrampoline()
 		{
 			if (!m_state.bTrampolineCreated)
 			{
-				size_t size = SafeHook::CreateTrampoline(m_target, nullptr);
-				m_originalSize = size;
+				size_t trampolineSize = GetTrampolineSize(m_target);
+				m_originalBytes.store(m_target, GetByteCodeLength(m_target, g_JmpInstructionSize));
 
-				void* pPage = g_pageController.allocate(size + g_JmpInstructionSize, 32);
-				m_originalBytes = (unsigned char*)g_pageController.allocate(size, 32);
+				void* pPage = g_pageController.allocate(trampolineSize + 14, 32); // 14 to be certain for x64 and x86
 
-				if (m_originalBytes) memcpy(m_originalBytes, m_target, size);
-
-				if (pPage && m_originalBytes)
+				if (pPage)
 				{
 					m_trampoline = (unsigned char*)pPage;
 					SafeHook::CreateTrampoline(m_target, m_trampoline, &m_trampolineSize);
@@ -1060,8 +1183,8 @@ namespace SafeHook
 	public:
 		Hook()
 		{
-			m_target = m_hook = m_trampoline = m_originalBytes = nullptr;
-			m_trampolineSize = m_originalSize = m_state.i32 = 0;
+			m_target = m_hook = m_trampoline = nullptr;
+			m_trampolineSize = m_state.i32 = 0;
 		}
 
 		Hook(void* pTarget, void* pHook, bool bEnable = true, void** pOriginal = nullptr)
@@ -1108,17 +1231,18 @@ namespace SafeHook
 			}
 		}
 
+		bool valid() const { return CheckValidAddress(m_target) && m_hook && m_state.bTrampolineCreated; }
+		bool enabled() const { return m_state.bEnabled; } // in case you want to use bool toggle storage for this without declaring a new variable
+
 		void Enable()
 		{
 			m_state.bEnabled = true;
 			if (m_state.bTrampolineCreated && !m_state.bTrampolineLinked)
 			{
-				ThreadRedirect(m_target, m_originalSize, m_hook);
-				scoped_unprotect unprotect((size_t)m_target, m_originalSize);
+				ThreadRedirect(m_target, m_originalBytes.size, m_trampoline);
+				scoped_unprotect unprotect(m_target, m_originalBytes.size);
 
-				memset(m_target, 0x90, m_originalSize);
-
-				MakeJMP((size_t)m_target, (size_t)m_hook);
+				MakeJMP(m_target, m_hook);
 
 				m_state.bTrampolineLinked = true;
 			}
@@ -1129,22 +1253,36 @@ namespace SafeHook
 			m_state.bEnabled = false;
 			if (m_state.bTrampolineCreated && m_state.bTrampolineLinked)
 			{
-				scoped_unprotect unprotect((size_t)m_target, m_originalSize);
-
-				if (m_originalBytes) memcpy((void*)m_target, m_originalBytes, m_originalSize);
+				m_originalBytes.restore(false); // Must ensure that address is valid
 
 				m_state.bTrampolineLinked = false;
 			}
 		}
 
+		void SafeEnable()
+		{
+			if (!valid())
+				SAFEHOOK_REPORT_HERE("Hook is not valid!");
+
+			Enable();
+		}
+
+		void SafeDisable()
+		{
+			if (!valid())
+				SAFEHOOK_REPORT_HERE("Hook is not valid!");
+
+			Disable();
+		}
+
 		~Hook()
 		{
-			if (CheckValidAddress(m_target)) // Sometimes the target might be already unloaded by the time the destructor is called, so we check if it's a valid address before trying to restore it
-				Disable(); // just to be safe, make sure to restore the original bytes before freeing the trampoline and original bytes memory
+			if (valid())
+				Disable();
 
-			m_trampoline = m_originalBytes = nullptr;
+			m_trampoline = nullptr;
 			m_target = m_hook = nullptr;
-			m_trampolineSize = m_originalSize = 0;
+			m_trampolineSize = 0;
 			m_state.i32 = 0;
 		}
 	};
@@ -1168,13 +1306,13 @@ namespace SafeHook
 		float* pf32;
 		double* pf64;
 
-		FORCEINLINE void Set(unsigned char i8) { i64 = 0LL;  this->i8 = i8; }
-		FORCEINLINE void Set(unsigned short i16) { i64 = 0LL; this->i16 = i16; }
-		FORCEINLINE void Set(unsigned int i32) { i64 = 0LL; this->i32 = i32; }
-		FORCEINLINE void Set(unsigned __int64 i64) { this->i64 = i64; }
-		FORCEINLINE void Set(float f32) { i64 = 0LL; this->f32 = f32; }
-		FORCEINLINE void Set(double f64) { this->f64 = f64; } // we don't have to clear out i64, already replaced by f64
-	} REG;
+		SAFEHOOK_FORCEINLINE void Set(unsigned char i8) { i64 = 0LL;  this->i8 = i8; }
+		SAFEHOOK_FORCEINLINE void Set(unsigned short i16) { i64 = 0LL; this->i16 = i16; }
+		SAFEHOOK_FORCEINLINE void Set(unsigned int i32) { i64 = 0LL; this->i32 = i32; }
+		SAFEHOOK_FORCEINLINE void Set(unsigned __int64 i64) { this->i64 = i64; }
+		SAFEHOOK_FORCEINLINE void Set(float f32) { i64 = 0LL; this->f32 = f32; }
+		SAFEHOOK_FORCEINLINE void Set(double f64) { this->f64 = f64; } // we don't have to clear out i64, already replaced by f64
+	};
 #else
 	union REG
 	{
@@ -1190,62 +1328,108 @@ namespace SafeHook
 
 		float* pf32;
 
-		FORCEINLINE void Set(unsigned char i8) { i32 = 0; this->i8 = i8; } 
-		FORCEINLINE void Set(unsigned short i16) { i32 = 0; this->i16 = i16; }
-		FORCEINLINE void Set(unsigned int i32) { this->i32 = i32; }
-		FORCEINLINE void Set(float f32) { this->f32 = f32; }
+		SAFEHOOK_FORCEINLINE void Set(unsigned char i8) { i32 = 0; this->i8 = i8; } 
+		SAFEHOOK_FORCEINLINE void Set(unsigned short i16) { i32 = 0; this->i16 = i16; }
+		SAFEHOOK_FORCEINLINE void Set(unsigned int i32) { this->i32 = i32; }
+		SAFEHOOK_FORCEINLINE void Set(float f32) { this->f32 = f32; }
 	};
 #endif
 
-	typedef union
+	union FLAGS
 	{
+		unsigned short i16;
 		struct
 		{
-			unsigned int CF : 1;
-			unsigned int BRKI : 1;
-			unsigned int PF : 1;
-			unsigned int Reserved1 : 1;
-			unsigned int AF : 1;
-			unsigned int Reserved2 : 1;
-			unsigned int ZF : 1;
-			unsigned int SF : 1;
+			unsigned short CF : 1; // Carry Flag
+			unsigned short BRKI : 1; // I/O Trap, always 1 on all other x86 processors
+			unsigned short PF : 1; // Parity Flag
+			unsigned short Reserved1 : 1;
+			unsigned short AF : 1; // Auxiliary Carry Flag
+			unsigned short Reserved2 : 1;
+			unsigned short ZF : 1; // Zero Flag
+			unsigned short SF : 1; // Sign Flag
 
-			unsigned int TF : 1;
-			unsigned int IF : 1;
-			unsigned int DF : 1;
-			unsigned int OF : 1;
-			unsigned int IOPL : 2;
-			unsigned int NT : 1;
-			unsigned int MD : 1;
-		}; // no more flags since pushfd only stores the lower 16 bits of EFLAGS
-		unsigned int i32;
-	} EFLAGS;
-
-#if SAFEHOOK_X64
-	typedef union
-	{
-		struct
-		{
-			unsigned __int64 CF : 1;
-			unsigned __int64 BRKI : 1;
-			unsigned __int64 PF : 1;
-			unsigned __int64 Reserved1 : 1;
-			unsigned __int64 AF : 1;
-			unsigned __int64 Reserved2 : 1;
-			unsigned __int64 ZF : 1;
-			unsigned __int64 SF : 1;
-
-			unsigned __int64 TF : 1;
-			unsigned __int64 IF : 1;
-			unsigned __int64 DF : 1;
-			unsigned __int64 OF : 1;
-			unsigned __int64 IOPL : 2;
-			unsigned __int64 NT : 1;
-			unsigned __int64 MD : 1;
+			unsigned short TF : 1; // Trap Flag
+			unsigned short IF : 1; // Interrupt Enable Flag
+			unsigned short DF : 1; // Direction Flag
+			unsigned short OF : 1; // Overflow Flag
+			unsigned short IOPL : 2; // I/O Privilege Level
+			unsigned short NT : 1; // Nested Task Flag
+			unsigned short MD : 1; // Mode Flag
 		};
-		unsigned __int64 i64;
-	} RFLAGS;
-#endif
+	};
+
+	union EFLAGS
+	{
+		unsigned int i32;
+		struct
+		{
+			unsigned int CF : 1; // Carry Flag
+			unsigned int BRKI : 1; // I/O Trap, always 1 on all other x86 processors
+			unsigned int PF : 1; // Parity Flag
+			unsigned int Reserved1 : 1;
+			unsigned int AF : 1; // Auxiliary Carry Flag
+			unsigned int Reserved2 : 1;
+			unsigned int ZF : 1; // Zero Flag
+			unsigned int SF : 1; // Sign Flag
+
+			unsigned int TF : 1; // Trap Flag
+			unsigned int IF : 1; // Interrupt Enable Flag
+			unsigned int DF : 1; // Direction Flag
+			unsigned int OF : 1; // Overflow Flag
+			unsigned int IOPL : 2; // I/O Privilege Level
+			unsigned int NT : 1; // Nested Task Flag
+			unsigned int MD : 1; // Mode Flag
+
+			unsigned int RF : 1; // Resume Flag
+			unsigned int VM : 1; // Virtual 8086 Mode
+			unsigned int AC : 1; // Alignment Check
+			unsigned int VIF : 1; // Virtual Interrupt Flag
+			unsigned int VIP : 1; // Virtual Interrupt Pending
+			unsigned int ID : 1; // Can use CPUID instruction
+			unsigned int Reserved : 8; 
+
+			unsigned int AESSCH : 1; // AES Key schedule loaded flag
+			unsigned int AI : 1; // Alternative Instruction Set
+		};
+	};
+
+	union RFLAGS
+	{
+		unsigned long long i64;
+		struct
+		{
+			unsigned long long CF : 1; // Carry Flag
+			unsigned long long BRKI : 1; // I/O Trap, always 1 on all other x86 processors
+			unsigned long long PF : 1; // Parity Flag
+			unsigned long long Reserved1 : 1;
+			unsigned long long AF : 1; // Auxiliary Carry Flag
+			unsigned long long Reserved2 : 1;
+			unsigned long long ZF : 1; // Zero Flag
+			unsigned long long SF : 1; // Sign Flag
+
+			unsigned long long TF : 1; // Trap Flag
+			unsigned long long IF : 1; // Interrupt Enable Flag
+			unsigned long long DF : 1; // Direction Flag
+			unsigned long long OF : 1; // Overflow Flag
+			unsigned long long IOPL : 2; // I/O Privilege Level
+			unsigned long long NT : 1; // Nested Task Flag
+			unsigned long long MD : 1; // Mode Flag
+
+			unsigned long long RF : 1; // Resume Flag
+			unsigned long long VM : 1; // Virtual 8086 Mode
+			unsigned long long AC : 1; // Alignment Check
+			unsigned long long VIF : 1; // Virtual Interrupt Flag
+			unsigned long long VIP : 1; // Virtual Interrupt Pending
+			unsigned long long ID : 1; // Can use CPUID instruction
+			unsigned long long Reserved : 8; 
+
+			unsigned long long AESSCH : 1; // AES Key schedule loaded flag
+			unsigned long long AI : 1; // Alternative Instruction Set
+			
+			unsigned long long Reserved32 : 32; // Reserved bits for 64-bit mode
+		};
+	};
 
 	typedef struct FPUREG
 	{
@@ -1400,9 +1584,9 @@ namespace SafeHook
 		REG r14;
 		REG r15;
 
-		REG& rax() { return *(REG*)(saved_esp.i64); }
-		RFLAGS& rflags() { return *(RFLAGS*)(saved_esp.i64 + 8); }
-		const REG& rsp() const { return (REG)(saved_esp.i64 + 0x18); } // you are not allowed to modify stack pointer
+		REG& rax() { return *(REG*)(saved_rsp.i64); }
+		RFLAGS& rflags() { return *(RFLAGS*)(saved_rsp.i64 + 8); }
+		const REG rsp() const { return (REG)(saved_rsp.i64 + 0x18); } // you are not allowed to modify stack pointer
 
 		XMMREG& xmm(int i _In_range_(0, 15)) { return FPUandSSE.xmm[i]; }
 		FPUREG& st(int i _In_range_(0, 7)) { return FPUandSSE.FPU.st[i]; }
@@ -1413,45 +1597,34 @@ namespace SafeHook
 	class MidAsmHookUnsafe
 	{
 	private:
-		uintptr_t address_of_hook = 0;
-
-		unsigned char* hook_bytes = nullptr;
-		uintptr_t cave_address = 0;
-		unsigned char original_cave_bytes[g_JmpInstructionSize + 8] = { 0 }; // to store the original bytes of the cave, we will restore them in the destructor. 16 bytes should be enough for most hooks, you can increase this if you need more
+		scoped_backup original_cave_bytes;
+		SafeAddress cave_address;
+		unsigned char *hook_bytes = nullptr;
 	public:
 		MidAsmHookUnsafe() = default;
 
 		MidAsmHookUnsafe(SafeAddress address_of_cave, void(__cdecl* hook_func)(CTX&))
 		{
-			address_of_hook = (uintptr_t)hook_func;
-			cave_address = address_of_cave.get();
+			cave_address = address_of_cave;
 			hook_bytes = (unsigned char*)g_pageController.allocate(sizeof(asm_data) + g_JmpInstructionSize, 32); // allocate memory for the hook code and the jump back to the original function
 			if (!hook_bytes)
 				SAFEHOOK_THROW("Failed to allocate memory for hook bytes!");
 
-			{
-				scoped_unprotect unprotect(cave_address, sizeof(original_cave_bytes));
-				memcpy(original_cave_bytes, (void*)cave_address, sizeof(original_cave_bytes)); // save the original bytes of the cave so we can restore them later
-			}
-
 			memcpy(hook_bytes, asm_data, sizeof(asm_data));
-			MakeJMP(hook_bytes + sizeof(asm_data), address_of_hook);
+			MakeJMP(hook_bytes + sizeof(asm_data), hook_func);
 
 			MakeCALL(cave_address, hook_bytes);
 		}
 
 		~MidAsmHookUnsafe()
 		{
-			if (cave_address && CheckValidAddress(cave_address) && hook_bytes)
-			{
-				scoped_unprotect unprotect(cave_address, sizeof(original_cave_bytes));
-				memcpy((void*)cave_address, original_cave_bytes, sizeof(original_cave_bytes));
-			}
+			if (!hook_bytes)
+				original_cave_bytes.~scoped_backup(); // won't execute further if we do this
 
 			if (hook_bytes)
 				hook_bytes = nullptr; // we won't free the memory, but at least we won't leave a dangling pointer. The memory will be freed when the process exits, so it shouldn't be a problem.
 
-			cave_address = 0;
+			cave_address = uintptr_t(0);
 		}
 
 		friend class MidAsmHook;
@@ -1497,9 +1670,11 @@ namespace SafeHook
 			case 4:
 				jmpSize = 5;
 				break;
+#if SAFEHOOK_X64
 			case 8:
 				jmpSize = 14;
 				break;
+#endif
 			default:
 				break;
 			}
@@ -1556,8 +1731,7 @@ namespace SafeHook
 
 		~MidAsmHook()
 		{
-			if (unsafe_hook.cave_address)
-				unsafe_hook.cave_address = 0; // avoid restoring original bytes, so it won't crash if the hook is called after this destructor
+			unsafe_hook.hook_bytes = nullptr; // Do not restore bytes for a wrapper
 
 			if (trampoline)
 				trampoline = nullptr; // everything handled by page controller
