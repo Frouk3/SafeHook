@@ -1,5 +1,6 @@
 # SafeHook
-Contains only safe mid assembler hook
+Contains basic hooking framework
 
 Uses HDE for hooking<br>
-SUPPORTS x86 FOR NOW<br>
+Full support for x86<br>
+Technical and untested support for x64<br>

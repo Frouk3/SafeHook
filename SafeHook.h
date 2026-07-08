@@ -5,7 +5,17 @@
 #elif defined(__MINGW32__)
 	#include <windows.h>
 #else
-	#error "No can't do without Windows.h"
+	#error "No support for this one. Targetting Windows only."
+#endif
+
+// Controls exception handling.
+// If you disable exceptions, then you're on your own, and expect the code to crash
+#if !defined(SAFEHOOK_NO_EXCEPTIONS)
+	#define SAFEHOOK_NO_EXCEPTIONS 0
+#endif
+
+#if !defined(SAFEHOOK_TEST)
+	#define SAFEHOOK_TEST 0
 #endif
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
@@ -47,15 +57,16 @@
 #include <ProcessSnapshot.h>
 #include <processthreadsapi.h>
 #include <TlHelp32.h>
+#include <initializer_list>
 
 // All credits for function hooks goes to DarkByte
 
 #if SAFEHOOK_X64
-typedef hde64s hde_s;
-#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
+	typedef hde64s hde_s;
+	#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
 #else
-typedef hde32s hde_s;
-#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
+	typedef hde32s hde_s;
+	#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
 #endif
 
 namespace SafeHook
@@ -140,6 +151,27 @@ namespace SafeHook
 		0xC3										// ret
 	};
 #endif
+#if SAFEHOOK_NO_EXCEPTIONS
+	class Exception
+	{
+	public:
+		Exception() = default;
+		Exception(const char* msg, const char* file, unsigned int line) {};
+		Exception(const Exception&) = default;
+		Exception(Exception&&) noexcept = default;
+
+		~Exception() = default;
+
+		Exception& operator=(const Exception& other) = default;
+		Exception& operator=(Exception&& other) noexcept = default;
+
+		const char* what() const { return ""; }
+		int line() const { return -1; }
+		const char* file() const { return ""; }
+
+		void DoFormat(const char* fmt, ...) {}
+	};
+#else
 	class Exception
 	{
 		char* m_msg;
@@ -247,20 +279,48 @@ namespace SafeHook
 			va_end(va);
 		}
 	};
+#endif
 
+#if SAFEHOOK_NO_EXCEPTIONS
+	inline void ReportException(const Exception& e) {}
+	inline void SilentReport(const char* fmt, ...) {}
+#else
 	inline void ReportException(const Exception& e)
 	{
 		Exception::ExceptionBuffer[0] = 0;
-		sprintf_s(Exception::ExceptionBuffer, "SafeHook Exception in %s: %s (line %d)", e.file(), e.what(), e.line());
+		sprintf_s(Exception::ExceptionBuffer, "SafeHook Exception in %s: %s (line %d)\n", e.file(), e.what(), e.line());
 		MessageBoxA(nullptr, Exception::ExceptionBuffer, "SafeHook", MB_ICONERROR | MB_OK);
 
 		OutputDebugStringA(Exception::ExceptionBuffer);
 	}
 
-#define SAFEHOOK_THROW(msg) throw SafeHook::Exception(msg, __FILE__, __LINE__)
-#define SAFEHOOK_THROW_FORMAT(msg, ...) do { SafeHook::Exception except(nullptr, __FILE__, __LINE__); except.DoFormat(msg, __VA_ARGS__); throw except; } while(0)
-// Also reports function where the exception was thrown, and the line number
-#define SAFEHOOK_REPORT_HERE(msg, ...) SAFEHOOK_THROW_FORMAT(__FUNCTION__ ## ": " ## msg, __VA_ARGS__)
+	inline void SilentReport(const char* fmt, ...)
+	{
+		va_list va;
+		va_start(va, fmt);
+
+		memset(Exception::ExceptionBuffer, 0, sizeof(Exception::ExceptionBuffer));
+		
+		vsprintf_s(Exception::ExceptionBuffer, fmt, va);
+
+		OutputDebugStringA(Exception::ExceptionBuffer);
+	}
+#endif
+
+#if SAFEHOOK_NO_EXCEPTIONS
+	#define SAFEHOOK_THROW(msg) do { std::abort(); } while(0)
+	#define SAFEHOOK_THROW_FORMAT(msg, ...) do { std::abort(); } while(0)
+	#define SAFEHOOK_REPORT_HERE(msg, ...) do { std::abort(); } while(0)
+	#define SAFEHOOK_CATCH(e) catch (const SafeHook::Exception& e) { std::abort(); }
+	#define SAFEHOOK_CATCH_RET(e) catch (const SafeHook::Exception& e) { std::abort(); return; }
+#else
+	#define SAFEHOOK_THROW(msg) throw SafeHook::Exception(msg, __FILE__, __LINE__)
+	#define SAFEHOOK_THROW_FORMAT(msg, ...) do { SafeHook::Exception except(nullptr, __FILE__, __LINE__); except.DoFormat(msg, __VA_ARGS__); throw except; } while(0)
+	// Also reports function where the exception was thrown, and the line number
+	#define SAFEHOOK_REPORT_HERE(msg, ...) SAFEHOOK_THROW_FORMAT(__FUNCTION__ ## ": " ## msg, __VA_ARGS__)
+	#define SAFEHOOK_CATCH(e) catch (const SafeHook::Exception& e) { SafeHook::ReportException(e); } 
+	#define SAFEHOOK_CATCH_RET(e) catch (const SafeHook::Exception& e) { SafeHook::ReportException(e); return; }
+#endif
 
 #define CHECK_ERROR(disasm) if (disasm.flags & F_ERROR) \
 	{													\
@@ -320,6 +380,351 @@ namespace SafeHook
 		SafeAddress& operator=(const SafeAddress& other) { m_address = other.m_address; return *this; }
 	};
 
+	template <typename T>
+	class Vector
+	{
+		T* m_data = nullptr; // first element
+		T* m_end = nullptr; // allocated end
+		T* m_last = nullptr; // last element
+
+		using isPtr = std::is_pointer<T>::value_type;
+
+		// Allocates memory for the vector
+		// Will potentially grow exponentially if newCapacity is 0
+		void reallocate(size_t newCapacity = 0)
+		{
+			if (!capacity() && !newCapacity)
+				newCapacity = 4; // default capacity
+				
+			T* oldData = m_data;
+			if (!newCapacity)
+				newCapacity = capacity() * 2; // doing x^2 growth isn't the best idea, x*2 is better for RAM usage
+
+			size_t sz = size();
+
+			m_data = new T[newCapacity];
+			if (oldData)
+			{
+				MoveElems(m_data, oldData, sz);
+				delete[] oldData;
+			}
+
+			m_last = m_data + sz;
+			m_end = m_data + newCapacity;
+		}
+
+		void destroy()
+		{
+			if (m_data)
+			{
+				delete[] m_data;
+				m_data = nullptr;
+				m_last = nullptr;
+				m_end = nullptr;
+			}
+		}
+
+		void DestructElems(T* begin, T* end)
+		{
+			if (!isPtr())
+			{
+				for (T* it = begin; it != end; ++it)
+					it->~T();
+			}
+		}
+
+		void ConstructElems(T* begin, T* end)
+		{
+			if (!isPtr())
+			{
+				for (T* it = begin; it != end; ++it)
+					new(it) T();
+			}
+		}
+
+		void ConstructElems(T* begin, T* end, const T& value)
+		{
+			if (!isPtr())
+			{
+				for (T* it = begin; it != end; ++it)
+					new(it) T(value);
+			}
+		}
+
+		void CopyElems(T* dest, const T* src, size_t count)
+		{
+			if (!isPtr())
+			{
+				for (size_t i = 0; i < count; ++i)
+					new(dest + i) T(src[i]);
+			}
+			else
+			{
+				memcpy(dest, src, count * sizeof(T));
+			}
+		}
+
+		void MoveElems(T* dest, const T* src, size_t count)
+		{
+			if (!isPtr())
+			{
+				for (size_t i = 0; i < count; ++i)
+					new(dest + i) T(std::move(src[i]));
+			}
+			else
+			{
+				memcpy(dest, src, count * sizeof(T));
+			}
+		}
+	public:
+		Vector() {}
+		Vector(size_t capacity) : m_data(nullptr), m_end(nullptr), m_last(nullptr)
+		{
+			reallocate(capacity);
+		}
+
+		Vector(const Vector& other) : m_data(nullptr), m_end(nullptr), m_last(nullptr)
+		{
+			reallocate(other.capacity());
+			CopyElems(m_data, other.m_data, other.size());
+			m_last = m_data + other.size();
+		}
+
+		Vector(Vector&& other) noexcept : m_data(other.m_data), m_end(other.m_end), m_last(other.m_last)
+		{
+			other.m_data = nullptr;
+			other.m_end = nullptr;
+			other.m_last = nullptr;
+		}
+
+		Vector(std::initializer_list<T> init) : m_data(nullptr), m_end(nullptr), m_last(nullptr)
+		{
+			reallocate(init.size());
+			CopyElems(m_data, init.begin(), init.size());
+			m_last = m_data + init.size();
+		}
+
+		~Vector()
+		{
+			DestructElems(m_data, m_last);
+			destroy();
+		}
+
+		Vector& operator=(const Vector& other)
+		{
+			if (this != &other)
+			{
+				destroy();
+				reallocate(other.capacity());
+				CopyElems(m_data, other.m_data, other.size());
+				m_last = m_data + other.size();
+			}
+			return *this;
+		}
+
+		Vector& operator=(Vector&& other) noexcept
+		{
+			if (this != &other)
+			{
+				destroy();
+				m_data = other.m_data;
+				m_end = other.m_end;
+				m_last = other.m_last;
+
+				other.m_data = nullptr;
+				other.m_end = nullptr;
+				other.m_last = nullptr;
+			}
+			return *this;
+		}
+
+		Vector& operator=(std::initializer_list<T> list)
+		{
+			destroy();
+			reallocate(list.size());
+			CopyElems(m_data, list.begin(), list.size());
+
+			m_last = m_data + list.size();
+			return *this;
+		}
+
+		void clear()
+		{
+			DestructElems(m_data, m_last);
+			m_last = m_data;
+		}
+
+		size_t capacity() const { return m_end - m_data; }
+		size_t size() const { return m_last - m_data; }
+		bool empty() const { return size() == 0; }
+		
+		void reserve(size_t newCapacity)
+		{
+			if (newCapacity > capacity())
+				reallocate(newCapacity);
+		}
+
+		void resize(size_t newSize)
+		{
+			if (newSize > capacity())
+				reallocate(newSize);
+			if (newSize > size())
+				m_last = m_data + newSize; // Increase size without constructing new elements
+			else if (newSize < size())
+				DestructElems(m_data + newSize, m_last);
+
+			m_last = m_data + newSize;
+		}
+
+		void push_back(const T& value)
+		{
+			if (size() >= capacity())
+				reallocate();
+
+			new(m_last) T(value);
+			++m_last;
+		}
+
+		void push_back(T&& value)
+		{
+			if (size() >= capacity())
+				reallocate();
+
+			new(m_last) T(std::move(value));
+
+			++m_last;
+		}
+
+		void pop_back()
+		{
+			if (!empty())
+			{
+				--m_last;
+				DestructElems(m_last, m_last + 1);
+			}
+		}
+
+		void insert(size_t index, const T& value)
+		{
+			if (index > size())
+				return; 
+
+			if (size() >= capacity())
+				reallocate();
+
+			MoveElems(m_data + index + 1, m_data + index, size() - index);
+			new(m_data + index) T(value);
+			++m_last;
+		}
+
+		void insert(size_t index, T&& value)
+		{
+			if (index > size())
+				return;
+
+			if (size() >= capacity())
+				reallocate();
+
+			MoveElems(m_data + index + 1, m_data + index, size() - index);
+			new(m_data + index) T(std::move(value));
+			++m_last;
+		}
+
+		void fill(const T& value)
+		{
+			for (T* it = m_data; it != m_last; ++it)
+				*it = value;
+		}
+
+		void fill(T&& value)
+		{
+			for (T* it = m_data; it != m_last; ++it)
+				*it = std::move(value);
+		}
+
+		void fill(const T& value, size_t count)
+		{
+			if (count > capacity())
+				reallocate(count);
+
+			for (size_t i = 0; i < count; ++i)
+				new(m_data + i) T(value);
+
+			m_last = m_data + count;
+		}
+
+		T* find(const T& value)
+		{
+			for (T* it = m_data; it != m_last; ++it)
+			{
+				if (*it == value)
+					return it;
+			}
+			return nullptr;
+		}
+
+		template <typename Func>
+		T* find_if(Func predicate)
+		{
+			for (T* it = m_data; it != m_last; ++it)
+			{
+				if (predicate(*it))
+					return it;
+			}
+			return nullptr;
+		}
+
+		template <typename Func>
+		void sort_by(Func comparator)
+		{
+			for (T* i = m_data; i != m_last; ++i)
+			{
+				for (T* j = i + 1; j != m_last; ++j)
+				{
+					if (comparator(*j, *i))
+					{
+						std::swap(*i, *j);
+					}
+				}
+			}
+		}
+
+		template <typename Func>
+		void for_each(Func func)
+		{
+			for (T* it = m_data; it != m_last; ++it)
+			{
+				func(*it);
+			}
+		}
+
+		void erase(size_t index)
+		{
+			if (index >= size())
+				return;
+
+			DestructElems(m_data + index, m_data + index + 1);
+			MoveElems(m_data + index, m_data + index + 1, size() - index - 1);
+
+			--m_last;
+		}
+
+		void erase(T* element)
+		{
+			if (element < m_data || element >= m_last)
+				return;
+
+			size_t index = element - m_data;
+			erase(index);
+		}
+
+		T* begin() { return m_data; }
+		const T* begin() const { return m_data; }
+
+		T* end() { return m_last; }
+		const T* end() const { return m_last; }
+	};
+
 	inline bool CheckValidAddress(SafeAddress address)
 	{
 		if (!address.get())
@@ -346,9 +751,11 @@ namespace SafeHook
 
 		if (Thread32First(hSnapshot, &te))
 		{
+			while (te.th32OwnerProcessID != curProcessId && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
+
 			do
 			{
-				if (te.th32OwnerProcessID == curProcessId && te.th32ThreadID != curThreadId)
+				if (te.th32ThreadID != curThreadId)
 				{
 					HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
 					if (hThread)
@@ -381,240 +788,502 @@ namespace SafeHook
 		CloseHandle(hSnapshot);
 	}
 
-	template <int num>
+	inline unsigned int GetDistanceTypeSize(SafeAddress from, SafeAddress to)
+	{
+		size_t distance = to.get() > from.get() ? to.get() - from.get() : from.get() - to.get(); // absolute distance
+		if (distance <= 0x7F)
+			return sizeof(uint8_t);
+		else if (distance <= 0x7FFFFFFF)
+			return sizeof(uint32_t);
+		else
+			return sizeof(uint64_t);
+	}
+
 	class PageController
 	{
-		class PageBlock
+	public:
+		static inline constexpr size_t PAGE_SIZE = 0x1000;
+		static inline size_t VIRTUAL_PAGE_SIZE = getAllocationGranularity();
+	protected:
+		class Page
 		{
-			void* m_base;
-			size_t m_size;
-			size_t m_alignment;
-
-			PageBlock* m_pNext, * m_pPrev;
-
-			void unchain()
+		protected:
+			struct Block
 			{
-				if (m_pPrev)
-					m_pPrev->m_pNext = m_pNext;
+				void* m_baseptr;
+				size_t m_size;
+				size_t m_alignment;
 
-				if (m_pNext)
-					m_pNext->m_pPrev = m_pPrev;
+				Block* m_pNext, *m_pPrev;
 
-				m_pNext = nullptr;
-				m_pPrev = nullptr;
+				Block(void* baseptr, size_t size, size_t alignment) : m_baseptr(baseptr), m_size(size), m_alignment(alignment), m_pNext(nullptr), m_pPrev(nullptr) {}
+
+				void chain(Block* pNext, Block* pPrev)
+				{
+					m_pNext = pNext;
+					m_pPrev = pPrev;
+
+					if (pNext)
+						pNext->m_pPrev = this;
+
+					if (pPrev)
+						pPrev->m_pNext = this;
+				}
+
+				void unchain()
+				{
+					if (m_pNext)
+						m_pNext->m_pPrev = m_pPrev;
+
+					if (m_pPrev)
+						m_pPrev->m_pNext = m_pNext;
+
+					m_pNext = nullptr;
+					m_pPrev = nullptr;
+				}
+			};
+
+			void chainBlock(Block* pBlock)
+			{
+				if (!m_pFirstBlock)
+				{
+					m_pFirstBlock = pBlock;
+					m_pLastBlock = pBlock;
+
+					pBlock->m_pNext = nullptr;
+					pBlock->m_pPrev = nullptr;
+				}
+				else
+				{
+					pBlock->chain(nullptr, m_pLastBlock);
+
+					m_pLastBlock = pBlock;
+				}
 			}
 
-			void init(void* base, size_t size, size_t alignment)
+			void unchainBlock(Block* pBlock)
 			{
-				m_base = base;
-				m_size = size;
-				m_alignment = alignment;
+				if (pBlock == m_pFirstBlock)
+					m_pFirstBlock = pBlock->m_pNext;
+
+				if (pBlock == m_pLastBlock)
+					m_pLastBlock = pBlock->m_pPrev;
+
+				pBlock->unchain();
+			}
+
+			void* m_base;
+			void* m_nextFree;
+			void* m_end;
+
+			Block* m_pFirstBlock, * m_pLastBlock;
+		public:
+			Page() : m_base(nullptr), m_nextFree(nullptr), m_end(nullptr), m_pFirstBlock(nullptr), m_pLastBlock(nullptr) {}
+			Page(void* base, size_t size)
+			{
+				init(base, size);
+			}
+
+			Page(const Page& other) noexcept
+			{
+				m_base = other.m_base;
+				m_nextFree = other.m_nextFree;
+				m_end = other.m_end;
+				m_pFirstBlock = other.m_pFirstBlock;
+				m_pLastBlock = other.m_pLastBlock;			
+			}
+
+			Page(Page&& other)
+			{
+				if (this != &other)
+				{
+					m_base = other.m_base;
+					m_nextFree = other.m_nextFree;
+					m_end = other.m_end;
+					m_pFirstBlock = other.m_pFirstBlock;
+					m_pLastBlock = other.m_pLastBlock;
+
+					other.m_base = nullptr;
+					other.m_nextFree = nullptr;
+					other.m_end = nullptr;
+					other.m_pFirstBlock = nullptr;
+					other.m_pLastBlock = nullptr;
+				}
+			}
+
+			Page& operator=(const Page& other) noexcept
+			{
+				m_base = other.m_base;
+				m_nextFree = other.m_nextFree;
+				m_end = other.m_end;
+				m_pFirstBlock = other.m_pFirstBlock;
+				m_pLastBlock = other.m_pLastBlock;
+			}
+
+			Page& operator=(Page&& other)
+			{
+				if (this != &other)
+				{
+					m_base = other.m_base;
+					m_nextFree = other.m_nextFree;
+					m_end = other.m_end;
+					m_pFirstBlock = other.m_pFirstBlock;
+					m_pLastBlock = other.m_pLastBlock;
+
+					other.m_base = nullptr;
+					other.m_nextFree = nullptr;
+					other.m_end = nullptr;
+					other.m_pFirstBlock = nullptr;
+					other.m_pLastBlock = nullptr;
+				}
+				return *this;
+			}
+
+			size_t size() const { return (uintptr_t)m_end - (uintptr_t)m_base; }
+			Block* firstBlock() const { return m_pFirstBlock; }
+			Block* lastBlock() const { return m_pLastBlock; }
+
+			void init(void* base, size_t size)
+			{
+				m_base = m_nextFree = base;
+				m_end = (void*)((uintptr_t)base + size);
+
+				m_pFirstBlock = m_pLastBlock = nullptr;
 			}
 
 			void deinit()
 			{
-				if (m_base)
+				for (Block* pBlock = m_pFirstBlock; pBlock; )
 				{
-					memset(m_base, 0, align(m_size, m_alignment));
+					Block* pNext = pBlock->m_pNext;
 
-					m_base = nullptr;
-					m_size = 0;
-					m_alignment = 0;
+					delete pBlock;
+					pBlock = pNext;
 				}
 
-				unchain();
+				m_pFirstBlock = m_pLastBlock = nullptr;
+				m_base = m_nextFree = m_end = nullptr;
 			}
-		public:
-			PageBlock() : m_base(nullptr), m_size(0), m_alignment(0) {}
-			PageBlock(void* base, size_t size, size_t align) : m_base(base), m_size(size), m_alignment(align) {}
-			~PageBlock() { deinit(); }
 
-			friend class Page;
+			void* getNextFree() const { return m_nextFree; }
+
+			void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+			{
+				if (!m_base)
+					SAFEHOOK_REPORT_HERE("Page is not initialized!");
+
+				uintptr_t current = (uintptr_t)m_nextFree;
+				if (align(current + size, alignment) > (uintptr_t)m_end) // out of memory
+					return nullptr;
+
+				m_nextFree = (void*)align(current + size, alignment);
+
+				Block* pBlock = new Block((void*)current, size, alignment);
+				chainBlock(pBlock);
+
+				return pBlock->m_baseptr;
+			}
+
+			void free(void* ptr)
+			{
+				if (!ptr)
+					return;
+
+				if (!m_base) // not that critical to throw an exception here
+					return;
+
+				if (ptr < m_base || ptr >= m_end)
+				{
+					SilentReport("It's not our pointer: %p %p\n", ptr, m_base);
+					return;
+				}
+
+				for (Block* pBlock = m_pFirstBlock; pBlock; pBlock = pBlock->m_pNext)
+				{
+					if (pBlock->m_baseptr == ptr)
+					{
+						if (pBlock == m_pLastBlock)
+							m_nextFree = pBlock->m_baseptr;
+
+						unchainBlock(pBlock);
+						delete pBlock;
+						return;
+					}
+				}
+			}
+
 			friend class PageController;
+			friend class AllocationRegion;
 		};
 
-		class Page
+		class AllocationRegion
 		{
-			void* m_baseptr;
+		protected:
+			void* m_baseAddress;
 			size_t m_size;
 
-			PageBlock* m_block;
-			PageBlock* m_pLast;
+			LONG m_allocRefCount;
 
-			void* m_pFreeSpace;
-
-			void init(size_t size)
+			Vector<Page> m_pages;
+		public:
+			AllocationRegion() : m_baseAddress(nullptr), m_size(0) {}
+			~AllocationRegion()
 			{
-				m_baseptr = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-				if (!m_baseptr)
-					SAFEHOOK_THROW("Failed to allocate page!");
-
-				m_pFreeSpace = m_baseptr;
-				m_pLast = nullptr;
-
-				m_size = size;
+				deinit();
 			}
 
-			void init(void* base, size_t size)
+			bool init(size_t size)
 			{
-				m_baseptr = base;
-				m_pFreeSpace = m_baseptr;
-				m_pLast = nullptr;
+				if (!size)
+					return false;
+
+				m_baseAddress = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+				if (!m_baseAddress)
+					return false;
 
 				m_size = size;
+				m_allocRefCount = 0;
+
+				m_pages.reserve(size / PAGE_SIZE);
+				for (size_t i = 0; i < size / PAGE_SIZE; ++i)
+				{
+					Page page;
+					page.init((void*)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+
+					m_pages.push_back(std::move(page));
+				}
+
+				return true;
 			}
 
-			bool initNear(void* base, size_t size)
+#if SAFEHOOK_X64
+			// can be used to initialize region near the module or something else
+			bool initNear(SafeAddress from, size_t size)
 			{
-				size_t granularity = SafeHook::getAllocationGranularity();
+				if (!size)
+					return false;
 
-				uintptr_t start = (uintptr_t)base > 0x7FFFFFFF ? (uintptr_t)base - 0x7FFFFFFF : 0;
-				uintptr_t end = (uintptr_t)base + 0x7FFFFFFF;
-
-				while (start < end)
+				while (true)
 				{
 					MEMORY_BASIC_INFORMATION mbi;
-					if (VirtualQuery((LPCVOID)start, &mbi, sizeof(mbi)) == 0)
-						break;
+					if (!VirtualQuery((void*)from.get(), &mbi, sizeof(mbi)))
+						return false;
+
+					if (GetDistanceTypeSize(from, SafeAddress(mbi.BaseAddress)) > sizeof(uint32_t)) // too far away
+						return false;
 
 					if (mbi.State == MEM_FREE && mbi.RegionSize >= size)
 					{
-						void* ptr = VirtualAlloc((LPVOID)start, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-						if (ptr)
-						{
-							init(ptr, size);
-							return true;
-						}
-					}
+						m_baseAddress = VirtualAlloc(mbi.BaseAddress, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+						if (!m_baseAddress)
+							return false;
 
-					start = align(start + mbi.RegionSize, granularity);
+						m_size = size;
+						m_allocRefCount = 0;
+
+						m_pages.reserve(size / PAGE_SIZE);
+						for (size_t i = 0; i < size / PAGE_SIZE; ++i)
+						{
+							Page page;
+							page.init((void*)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+							m_pages.push_back(std::move(page));
+						}
+						return true;
+					}
 				}
+
 				return false;
 			}
+#endif
 
-			void* alloc(size_t size, size_t align)
+			void deinit()
 			{
-				if (!m_baseptr)
-					SAFEHOOK_THROW("Page is not initialized!");
+				for (Page& page : m_pages)
+					page.deinit();
 
-				if ((size_t)m_pFreeSpace - (size_t)m_baseptr > m_size) // out of bounds check
-					return nullptr;
+				m_pages.clear();
 
-				PageBlock* block = new PageBlock(m_pFreeSpace, size, align);
-				if (!m_block)
-					m_block = block;
+				if (m_baseAddress)
+					VirtualFree(m_baseAddress, 0, MEM_RELEASE);
 
-				if (m_pLast)
-					chain(m_pLast, block);
-
-				m_pLast = block;
-
-				m_pFreeSpace = (void*)((uintptr_t)SafeHook::align((size_t)m_pFreeSpace + size, align));
-
-				return block->m_base;
+				m_baseAddress = nullptr;
+				m_size = 0;
 			}
 
-			void chain(PageBlock* what, PageBlock* it)
+			void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 			{
-				PageBlock* prev = what;
-				PageBlock* next = prev->m_pNext;
-
-				it->m_pPrev = prev;
-				it->m_pNext = next;
-
-				if (prev)
-					prev->m_pNext = it;
-
-				if (next)
-					next->m_pPrev = it;
-			}
-		public:
-			Page() : m_baseptr(nullptr), m_block(nullptr), m_size(0) {}
-
-			~Page()
-			{
-				if (m_block)
+				for (Page& page : m_pages)
 				{
-					PageBlock* curr = m_block;
-					while (curr)
+					void* ptr = page.alloc(size, alignment);
+					if (ptr)
 					{
-						PageBlock* next = curr->m_pNext;
-						delete curr;
-						curr = next;
+						m_allocRefCount++;
+						return ptr;
 					}
 				}
+				return nullptr;
+			}
+#if SAFEHOOK_X64
+			bool checkDistance2GB(SafeAddress from) const
+			{
+				if (!m_baseAddress)
+					return false;
 
-				if (m_baseptr)
+				return GetDistanceTypeSize(from, SafeAddress(m_baseAddress)) <= sizeof(uint32_t);
+			}
+#endif
+
+			void free(void* ptr)
+			{
+				if (!ptr)
+					return;
+
+				for (Page& page : m_pages)
 				{
-					VirtualFree(m_baseptr, 0, MEM_RELEASE);
-					m_baseptr = nullptr;
+					if (ptr >= page.m_base && ptr < page.m_end)
+					{
+						page.free(ptr);
+						m_allocRefCount--;
+						return;
+					}
 				}
-
-				m_pLast = nullptr;
-				m_pFreeSpace = nullptr;
-
-				m_size = 0;
 			}
 
 			friend class PageController;
 		};
 
-		size_t m_pageCount;
-		size_t m_pageNearCount;
-		Page m_pages[num] = {};
-		Page m_nearPages[num] = {};
-
-		void CheckOutOfSlotNearPage()
-		{
-			if (m_pageNearCount >= num)
-				SAFEHOOK_THROW("Out of near page slots!");
-		}
-
-		void CheckOutOfSlotPage()
-		{
-			if (m_pageCount >= num)
-				SAFEHOOK_THROW("Out of page slots!");
-		}
+		Vector<AllocationRegion*> m_regions;
+#if SAFEHOOK_X64
+		Vector<AllocationRegion*> m_nearRegions;
+#endif
 	public:
-		PageController() : m_pageCount(0) {}
+		PageController() {}
 		~PageController()
 		{
-			m_pageCount = 0;
+			for (AllocationRegion* pRegion : m_regions)
+			{
+				pRegion->deinit();
+				delete pRegion;
+			}
+
+#if SAFEHOOK_X64
+			for (AllocationRegion* pRegion : m_nearRegions)
+			{
+				pRegion->deinit();
+				delete pRegion;
+			}
+#endif
 		}
 
-		void* allocate(size_t size, size_t align = 32)
+		void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 		{
-			CheckOutOfSlotPage();
-			for (size_t i = 0; i < m_pageCount; i++)
+			if (!size)
+				return nullptr;
+
+			for (AllocationRegion* pRegion : m_regions)
 			{
-				void* ptr = m_pages[i].alloc(size, align);
+				void* ptr = pRegion->alloc(size, alignment);
 				if (ptr)
 					return ptr;
 			}
-			m_pages[m_pageCount].init(0x10000);
 
-			return m_pages[m_pageCount++].alloc(size, align);
-		}
-
-		void* allocateNear(void* base, size_t size, size_t align = 32)
-		{
-			CheckOutOfSlotNearPage();
-			for (size_t i = 0; i < m_pageNearCount; i++)
+			AllocationRegion* pRegion = new AllocationRegion();
+			if (!pRegion->init(VIRTUAL_PAGE_SIZE))
 			{
-				void* ptr = m_nearPages[i].alloc(size, align);
-				if (ptr)
-					return ptr;
+				delete pRegion;
+				SAFEHOOK_THROW_FORMAT("Could not even allocate page in whole virtual memory space, huh???? %zu", size);
+				return nullptr;
 			}
-			if (m_nearPages[m_pageNearCount].initNear(base, 0x10000))
-				return m_nearPages[m_pageNearCount++].alloc(size, align);
-			else
-				SAFEHOOK_THROW("Failed to allocate near page!");
 
-			return nullptr;
+			m_regions.push_back(pRegion);
+			return pRegion->alloc(size, alignment);
 		}
+#if SAFEHOOK_X64
+		void* allocNear(SafeAddress from, size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+		{
+			if (!size)
+				return nullptr;
+
+			for (AllocationRegion* pRegion : m_nearRegions)
+			{
+				if (pRegion->checkDistance2GB(from))
+				{
+					void* ptr = pRegion->alloc(size, alignment);
+					if (ptr)
+						return ptr;
+				}
+			}
+
+			AllocationRegion* pRegion = new AllocationRegion();
+			if (!pRegion->initNear(from, VIRTUAL_PAGE_SIZE))
+			{
+				delete pRegion;
+				SilentReport("Could not allocate near base page, maybe try allocating in whole virtual memory space? %p\n", from.get());
+				return nullptr;
+			}
+
+			m_nearRegions.push_back(pRegion);
+			return pRegion->alloc(size, alignment);
+		}
+#endif
+
+		void release(void* ptr)
+		{
+			if (!ptr)
+				return;
+
+			for (AllocationRegion*& pRegion : m_regions)
+			{
+				if (ptr >= pRegion->m_baseAddress && ptr < (void*)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
+				{
+					pRegion->free(ptr);
+					if (pRegion->m_allocRefCount == 0)
+					{
+						pRegion->deinit();
+						m_regions.erase(&pRegion);
+						delete pRegion;
+					}
+					return;
+				}
+			}
+#if SAFEHOOK_X64 // only x64 has near allocation, not critical to check for x86
+			for (AllocationRegion*& pRegion : m_nearRegions)
+			{
+				if (ptr >= pRegion->m_baseAddress && ptr < (void*)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
+				{
+					pRegion->free(ptr);
+					if (pRegion->m_allocRefCount == 0)
+					{
+						pRegion->deinit();
+						m_nearRegions.erase(&pRegion);
+						delete pRegion;
+					}
+					return;
+				}
+			}
+#endif
+		}
+
+#if SAFEHOOK_X64
+		// use it to have a region for hooking into specific module
+		AllocationRegion* allocRegionMod(void* base, size_t size)
+		{
+			AllocationRegion* pRegion = new AllocationRegion();
+			if (!pRegion->initNear(base, size))
+			{
+				delete pRegion;
+				SilentReport("Oh fiddlesticks! %p\n", base);
+				return nullptr;
+			}
+
+			m_nearRegions.push_back(pRegion); // still track it, shall we?
+
+			return pRegion;
+		}
+#endif
 	};
 
-	inline PageController<16> g_pageController; // 16 pages should be enough for most use cases, you can increase this if you need more
+	inline PageController g_pageController;
 
 	class scoped_unprotect
 	{
@@ -660,17 +1329,6 @@ namespace SafeHook
 		}
 	};
 
-	inline unsigned int GetDistanceTypeSize(SafeAddress from, SafeAddress to)
-	{
-		size_t distance = to.get() > from.get() ? to.get() - from.get() : from.get() - to.get(); // absolute distance
-		if (distance <= 0x7F)
-			return sizeof(uint8_t);
-		else if (distance <= 0x7FFFFFFF)
-			return sizeof(uint32_t);
-		else
-			return sizeof(uint64_t);
-	}
-
 	inline void MemoryFill(SafeAddress address, unsigned char value, size_t size)
 	{
 		scoped_unprotect unprotect(address.get(), size);
@@ -702,6 +1360,23 @@ namespace SafeHook
 		scoped_unprotect unprotect(address.get(), size);
 
 		memcpy((void*)address.get(), data, size);
+	}
+
+	template <typename T>
+	inline T ReadMemory(SafeAddress address, bool vp = true)
+	{
+		scoped_unprotect x;
+		if (vp)
+			x.protect(address.get(), sizeof(T));
+
+		return *(T*)address.get();
+	}
+
+	inline void ReadMemoryRaw(SafeAddress address, void* data, size_t size)
+	{
+		scoped_unprotect unprotect(address.get(), size);
+
+		memcpy(data, (void*)address.get(), size);
 	}
 
 	class scoped_backup
@@ -742,7 +1417,7 @@ namespace SafeHook
 			this->size = size;
 
 			backup = new unsigned char[size];
-			memcpy(backup, (void*)address.get(), size);
+			ReadMemoryRaw(address, backup, size);
 		}
 
 		void restore(bool bCheck = true)
@@ -755,17 +1430,26 @@ namespace SafeHook
 						return;
 				}
 				
-				scoped_unprotect unprotect(address.get(), size);
 				WriteMemoryRaw(address, backup, size);
 			}
 		}
 
 		bool empty() const { return !address.get() || !size || !backup; }
 
+		void clear()
+		{
+			if (backup)
+			{
+				delete[] backup;
+				backup = nullptr;
+			}
+			address = uintptr_t(0);
+			size = 0;
+		}
+
 		friend class Hook;
 	};
 
-	// Unfortunately does not work for jmp/call far [rip+0] instructions
 	inline uintptr_t GetBranchDestination(SafeAddress address)
 	{
 		hde_s disasm = { 0 };
@@ -774,33 +1458,53 @@ namespace SafeHook
 
 		if (disasm.flags & F_RELATIVE)
 		{
-			if (disasm.flags & F_IMM8)
-				return (uintptr_t)(address + disasm.len + (char)disasm.imm.imm8);
-			else if (disasm.flags & F_IMM16)
-				return (uintptr_t)(address + disasm.len + disasm.imm.imm16);
-			else if (disasm.flags & F_IMM32)
-				return (uintptr_t)(address + disasm.len + disasm.imm.imm32);
+			switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
+			{
+			case F_IMM8:
+				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm8);
+			case F_IMM16:
+				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm16);
+			case F_IMM32:
+				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm32);
 #if SAFEHOOK_X64
-			else if (disasm.flags & F_IMM64)
-				return (uintptr_t)(address + disasm.len + disasm.imm.imm64);
+			case F_IMM64:
+				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm64); // thinking about it, how can we have relative with 8 bytes long pointer?
 #endif
-			else
-				return 0;
+			default:
+				break;
+			}
 		}
 		else
 		{
-			if (disasm.flags & F_IMM8)
-				return (uintptr_t)(disasm.imm.imm8);
-			else if (disasm.flags & F_IMM16)
-				return (uintptr_t)(disasm.imm.imm16);
-			else if (disasm.flags & F_IMM32)
-				return (uintptr_t)(disasm.imm.imm32);
-#if SAFEHOOK_X64
-			else if (disasm.flags & F_IMM64)
-				return (uintptr_t)(disasm.imm.imm64);
-#endif
+			if (disasm.opcode == 0xFF && disasm.flags & F_MODRM)
+			{
+				switch (disasm.modrm & 0x38)
+				{
+				case 0x10: // call
+				case 0x20: // jmp
+					return *(uintptr_t*)(address.get() + disasm.len + disasm.imm.imm32);
+				default:
+					break;
+				}
+			}
 			else
-				return 0;
+			{
+				switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
+				{
+				case F_IMM8:
+					return disasm.imm.imm8;
+				case F_IMM16:
+					return disasm.imm.imm16;
+				case F_IMM32:
+					return disasm.imm.imm32;
+#if SAFEHOOK_X64
+				case F_IMM64:
+					return disasm.imm.imm64;
+#endif
+				default:
+					break;
+				}
+			}
 		}
 
 		return 0;
@@ -869,7 +1573,7 @@ namespace SafeHook
 			}
 #endif
 			default:
-				SAFEHOOK_THROW("Invalid distance for JMP instruction!"); // this should never happen since we check the distance type size beforehand
+				// SAFEHOOK_THROW("Invalid distance for JMP instruction!"); // this should never happen since we check the distance type size beforehand // +: Should we really throw an exception here?
 				break;
 		}
 
@@ -903,7 +1607,7 @@ namespace SafeHook
 			}
 #endif
 			default:
-				SAFEHOOK_THROW("Invalid distance for CALL instruction!");
+				// SAFEHOOK_THROW("Invalid distance for CALL instruction!"); // +: Should we really throw an exception here?
 				break;
 		}
 
@@ -934,6 +1638,25 @@ namespace SafeHook
 		}
 	}
 
+	// whenether there's tricks in assembly that would make hde disassembler fail, we can use this function to safely skip over the instruction and get the next instruction address
+	inline size_t HdeCheckOffsetFor(hde_s* disasm)
+	{
+#if SAFEHOOK_X64
+		if (disasm->opcode == 0xFF && disasm->flags & F_MODRM)
+		{
+			switch (disasm->modrm & 0x38)
+			{
+			case 0x10: // call
+			case 0x20: // jmp
+				return disasm->len + sizeof(uint64_t);
+			default:
+				break;
+			}
+		}
+#endif
+		return disasm->len;
+	}
+
 	inline size_t GetTrampolineSize(SafeAddress src) // cannot really depend on trampoline placement here...
 	{
 		hde_s disasm = { 0 };
@@ -962,6 +1685,14 @@ namespace SafeHook
 			{
 				size += SAFEHOOK_BY_ARCH(5, 14);
 			}
+#if SAFEHOOK_X64
+			else if (*p == 0xFF)
+			{
+				size_t sz = HdeCheckOffsetFor(&disasm);
+				size += sz;
+				disasm.len = sz;
+			}
+#endif
 			else
 			{
 				size += disasm.len;
@@ -983,6 +1714,8 @@ namespace SafeHook
 		{
 			HDE_DISASM(src + readOffs, &disasm);
 			CHECK_ERROR(disasm);
+
+			disasm.len = (uint8_t)HdeCheckOffsetFor(&disasm);
 
 			size += disasm.len;
 			readOffs += disasm.len;
@@ -1014,13 +1747,15 @@ namespace SafeHook
 				jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
 				break;
 			}
+#if SAFEHOOK_X64
 			case sizeof(uint64_t) :
 			{
 				jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
 				break;
 			}
+#endif
 			default:
-				SAFEHOOK_THROW("Invalid distance for trampoline!");
+				 // SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
 				break;
 		};
 
@@ -1088,17 +1823,19 @@ namespace SafeHook
 				}
 				else
 				{
+					disasm.len = HdeCheckOffsetFor(&disasm);
+
 					memcpy(dst + writeOffs, src + readOffs, disasm.len);
 					writeOffs += disasm.len;
 				}
 #else
 				if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (*(p + 1) >= 0x80 && *(p + 1) <= 0x8F)))
 				{
-					WriteMemory<unsigned char>(dst + writeOffs, (unsigned char)0x0F);
-					WriteMemory<unsigned char>(dst + writeOffs + 1, *p != 0x0F ? *p + 0x10 : *(p + 1));
+					WriteMemory<unsigned char>(q, (unsigned char)0x0F);
+					WriteMemory<unsigned char>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1));
 
 					uintptr_t branchDest = GetBranchDestination(p);
-					WriteMemory<uintptr_t>(dst + writeOffs + 2, MakeRelativeOffsetIMM32(dst + writeOffs, branchDest));
+					WriteMemory<uintptr_t>(q + 2, MakeRelativeOffsetIMM32(q, branchDest));
 
 					writeOffs += 6;
 				}
@@ -1106,8 +1843,8 @@ namespace SafeHook
 				{
 					uintptr_t branchDest = GetBranchDestination(p);
 
-					WriteMemory<unsigned char>(dst + writeOffs, *p); // copy the jmp/call opcode
-					WriteMemory<unsigned int>(dst + writeOffs + 1, MakeRelativeOffsetIMM32(dst + writeOffs, branchDest));
+					WriteMemory<unsigned char>(q, *p); // copy the jmp/call opcode
+					WriteMemory<unsigned int>(q + 1, MakeRelativeOffsetIMM32(q, branchDest));
 
 					writeOffs += 5;
 				}
@@ -1115,7 +1852,7 @@ namespace SafeHook
 				{
 					uintptr_t branchDest = GetBranchDestination(p);
 
-					MakeJMP(dst + writeOffs, branchDest);
+					MakeJMP(q, branchDest);
 					writeOffs += 5;
 				}
 				else
@@ -1163,9 +1900,19 @@ namespace SafeHook
 			if (!m_state.bTrampolineCreated)
 			{
 				size_t trampolineSize = GetTrampolineSize(m_target);
-				m_originalBytes.store(m_target, GetByteCodeLength(m_target, g_JmpInstructionSize));
+				// scary thing here is that original function code might be 3-4 bytes long, and knowing how sections are operated, we might end up spoiling the next function's code
+				m_originalBytes.store(m_target, GetByteCodeLength(m_target, 5)); // try relative first
 
-				void* pPage = g_pageController.allocate(trampolineSize + 14, 32); // 14 to be certain for x64 and x86
+				void* pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 14), g_pageController.allocNear(m_target, trampolineSize + 14)); // 14 to be certain for x64 and x86
+#if SAFEHOOK_X64
+				if (!pPage) // allocating near failed, and now we will just try far jmp indirect, FUCK!
+				{
+					m_originalBytes.clear();
+					m_originalBytes.store(m_target, GetByteCodeLength(m_target, 14)); // yay, 14 bytes
+
+					pPage = g_pageController.alloc(trampolineSize + 14);
+				}
+#endif
 
 				if (pPage)
 				{
@@ -1204,10 +1951,7 @@ namespace SafeHook
 				if (bEnable)
 					Enable();
 			}
-			catch (const Exception& e)
-			{
-				ReportException(e);
-			}
+			SAFEHOOK_CATCH(e);
 		}
 
 		Hook(void* pTarget, void* pHook, void** pOriginal)
@@ -1225,10 +1969,7 @@ namespace SafeHook
 
 				Enable();
 			}
-			catch (const Exception& e)
-			{
-				ReportException(e);
-			}
+			SAFEHOOK_CATCH(e);
 		}
 
 		bool valid() const { return CheckValidAddress(m_target) && m_hook && m_state.bTrampolineCreated; }
@@ -1280,6 +2021,8 @@ namespace SafeHook
 			if (valid())
 				Disable();
 
+			g_pageController.release(m_trampoline);
+
 			m_trampoline = nullptr;
 			m_target = m_hook = nullptr;
 			m_trampolineSize = 0;
@@ -1306,6 +2049,7 @@ namespace SafeHook
 		float* pf32;
 		double* pf64;
 
+		// methods used for moving value with zero extension
 		SAFEHOOK_FORCEINLINE void Set(unsigned char i8) { i64 = 0LL;  this->i8 = i8; }
 		SAFEHOOK_FORCEINLINE void Set(unsigned short i16) { i64 = 0LL; this->i16 = i16; }
 		SAFEHOOK_FORCEINLINE void Set(unsigned int i32) { i64 = 0LL; this->i32 = i32; }
@@ -1328,6 +2072,7 @@ namespace SafeHook
 
 		float* pf32;
 
+		// methods used for moving value with zero extension
 		SAFEHOOK_FORCEINLINE void Set(unsigned char i8) { i32 = 0; this->i8 = i8; } 
 		SAFEHOOK_FORCEINLINE void Set(unsigned short i16) { i32 = 0; this->i16 = i16; }
 		SAFEHOOK_FORCEINLINE void Set(unsigned int i32) { this->i32 = i32; }
@@ -1437,7 +2182,6 @@ namespace SafeHook
 		unsigned long long Mantissa;
 		unsigned short ExponentSign;
 		char Reserved[6];
-
 	private:
 		double toDouble() const
 		{
@@ -1455,6 +2199,25 @@ namespace SafeHook
 			return sign * ldexp(fraction, realExp); // ldexp is used to compute fraction * 2^realExp efficiently and accurately
 		}
 
+#if !defined(_MSC_VER)
+		// more precision
+		long double toLongDouble() const
+		{
+			unsigned short exp = ExponentSign & 0x7FFF;
+			int sign = ExponentSign & 0x8000 ? -1 : 1;
+			unsigned long long mantissa = Mantissa;
+
+			if (exp == 0 && mantissa == 0)
+				return 0.0L * sign;
+
+			int realExp = exp - 16383;
+
+			long double fraction = (long double)mantissa / (long double)(1ULL << 63); 
+
+			return sign * ldexpl(fraction, realExp);
+		}
+
+#endif
 		void setDouble(double x)
 		{
 			memset(this, 0, sizeof(FPUREG));
@@ -1480,13 +2243,52 @@ namespace SafeHook
 
 			Mantissa = (unsigned long long)(frac * (double)(1ULL << 63)); // convert the fractional part to the fixed-point representation used in the mantissa
 		}
+		
+		// Microsoft are jerks for not supporting long double and instead treat it as simple double
+#if !defined(_MSC_VER)
+		// more precision
+		void setLongDouble(long double x)
+		{
+			memset(this, 0, sizeof(FPUREG));
+
+			if (x == 0.0L)
+			{
+				if (signbit(x))
+					ExponentSign = 0x8000;
+
+				return;
+			}
+
+			int exp;
+
+			long double frac = frexpl(abs(x), &exp);
+
+			frac *= 2.0L;
+			exp -= 1;
+
+			uint16_t sign = signbit(x) ? 0x8000 : 0;
+			uint16_t biasedExp = (uint16_t)(exp + 16383);
+			ExponentSign = sign | biasedExp;
+
+			Mantissa = (unsigned long long)(frac * (long double)(1ULL << 63));
+		}
+#endif
 	public:
+#if defined(_MSC_VER) // prefer long double for non-MSVC compilers, since MSVC doesn't support it properly
 		operator double() const { return toDouble(); }
-		// operator float() const { return (float)toDouble(); } // let's prefer it double for better precision, but you can add this if you want
+#else
+		operator long double() const { return toLongDouble(); }
+#endif
+		// operator float() const { return (float)toDouble(); } // use double instead, compiler gets confused which one to use
 
 		FPUREG() : Mantissa(0), ExponentSign(0) {}
+#if defined(_MSC_VER)
 		FPUREG(double x) { setDouble(x); }
+#else
+		FPUREG(long double x) { setLongDouble(x); }
+#endif
 
+#if defined(_MSC_VER)
 		FPUREG& operator=(double x) { setDouble(x); return *this; }
 		FPUREG& operator*=(double x) { setDouble(toDouble() * x); return *this; }
 		FPUREG& operator/=(double x) { setDouble(toDouble() / x); return *this; }
@@ -1497,6 +2299,18 @@ namespace SafeHook
 		FPUREG operator/(double x) const { FPUREG result; result.setDouble(toDouble() / x); return result; }
 		FPUREG operator+(double x) const { FPUREG result; result.setDouble(toDouble() + x); return result; }
 		FPUREG operator-(double x) const { FPUREG result; result.setDouble(toDouble() - x); return result; }
+#else
+		FPUREG& operator=(long double x) { setLongDouble(x); return *this; }
+		FPUREG& operator*=(long double x) { setLongDouble(toLongDouble() * x); return *this; }
+		FPUREG& operator/=(long double x) { setLongDouble(toLongDouble() / x); return *this; }
+		FPUREG& operator+=(long double x) { setLongDouble(toLongDouble() + x); return *this; }
+		FPUREG& operator-=(long double x) { setLongDouble(toLongDouble() - x); return *this; }
+
+		FPUREG& operator*(long double x) const { FPUREG result; result.setLongDouble(toLongDouble() * x); return result; }
+		FPUREG& operator/(long double x) const { FPUREG result; result.setLongDouble(toLongDouble() / x); return result; }
+		FPUREG& operator+(long double x) const { FPUREG result; result.setLongDouble(toLongDouble() + x); return result; }
+		FPUREG& operator-(long double x) const { FPUREG result; result.setLongDouble(toLongDouble() - x); return result; }
+#endif
 	} FPUREG;
 
 	typedef union
@@ -1606,7 +2420,7 @@ namespace SafeHook
 		MidAsmHookUnsafe(SafeAddress address_of_cave, void(__cdecl* hook_func)(CTX&))
 		{
 			cave_address = address_of_cave;
-			hook_bytes = (unsigned char*)g_pageController.allocate(sizeof(asm_data) + g_JmpInstructionSize, 32); // allocate memory for the hook code and the jump back to the original function
+			hook_bytes = (unsigned char*)g_pageController.alloc(sizeof(asm_data) + g_JmpInstructionSize); // allocate memory for the hook code and the jump back to the original function
 			if (!hook_bytes)
 				SAFEHOOK_THROW("Failed to allocate memory for hook bytes!");
 
@@ -1618,11 +2432,14 @@ namespace SafeHook
 
 		~MidAsmHookUnsafe()
 		{
-			if (!hook_bytes)
-				original_cave_bytes.~scoped_backup(); // won't execute further if we do this
+			if (!hook_bytes) // if hook_bytes is nullptr, it might mean two things, wrapper does not want to restore the original bytes, or was not allocated at all
+				original_cave_bytes.clear();
 
 			if (hook_bytes)
-				hook_bytes = nullptr; // we won't free the memory, but at least we won't leave a dangling pointer. The memory will be freed when the process exits, so it shouldn't be a problem.
+			{
+				g_pageController.release(hook_bytes);
+				hook_bytes = nullptr;
+			}
 
 			cave_address = uintptr_t(0);
 		}
@@ -1639,22 +2456,23 @@ namespace SafeHook
 
 		// Try to find a place to inject the trampoline
 		// You cannot just put a trampoline in the middle of instruction and expect it to work
-		void handleTrampoline(uintptr_t _address, size_t& orig_size, bool bTryAllocNear = false)
+		SAFEHOOK_BY_ARCH(
+		void handleTrampoline(uintptr_t _address, size_t& orig_size),
+		void handleTrampoline(uintptr_t _address, size_t& orig_size, bool bTryAllocNear = true))
 		{
 			size_t orignal_size = CreateTrampoline((unsigned char*)_address, nullptr);
 
-			if (SAFEHOOK_X86)
-				bTryAllocNear = false; // for x86 there's no need for allocating near, since the relative jump can reach anywhere in the 4GB address space
-
+#if SAFEHOOK_X64
 			if (bTryAllocNear)
 			{
-				trampoline = (unsigned char*)g_pageController.allocateNear((void*)_address, orignal_size + g_JmpInstructionSize * 2, 32);
+				trampoline = (unsigned char*)g_pageController.allocNear((void*)_address, orignal_size + g_JmpInstructionSize * 2);
 				if (!trampoline)
-					trampoline = (unsigned char*)g_pageController.allocate(orignal_size + g_JmpInstructionSize * 2, 32);
+					trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
 			}
 			else
+#endif
 			{
-				trampoline = (unsigned char*)g_pageController.allocate(orignal_size + g_JmpInstructionSize * 2, 32);
+				trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
 			}
 			if (!this->trampoline)
 			{
@@ -1693,11 +2511,7 @@ namespace SafeHook
 			{
 				handleTrampoline(_address.get(), orig_size);
 			}
-			catch (const SafeHook::Exception& e)
-			{
-				ReportException(e);
-				return;
-			}
+			SAFEHOOK_CATCH_RET(e);
 
 			if (!trampoline)
 				return;
@@ -1706,11 +2520,7 @@ namespace SafeHook
 			{
 				new (&unsafe_hook) MidAsmHookUnsafe(trampoline, hook_func);
 			}
-			catch (const SafeHook::Exception& e)
-			{
-				ReportException(e);
-				return;
-			}
+			SAFEHOOK_CATCH_RET(e);
 			// we need to proceed with the "MidAsmHookUnsafe" before it is connected to the main routine, if we do it after, we might run into unhandled exception
 
 			scoped_unprotect unprotect(_address.get(), orig_size);
@@ -1731,13 +2541,29 @@ namespace SafeHook
 
 		~MidAsmHook()
 		{
+			g_pageController.release(unsafe_hook.hook_bytes);
 			unsafe_hook.hook_bytes = nullptr; // Do not restore bytes for a wrapper
 
 			if (trampoline)
-				trampoline = nullptr; // everything handled by page controller
+			{
+				g_pageController.release(trampoline);
+				trampoline = nullptr; // everything else is handled by page controller
+			}
 
 			// unsafe_hook will automatically destruct itself
 		}
 	};
+
+#if SAFEHOOK_TEST
+	inline void TestPageController()
+	{
+		void* p = g_pageController.alloc(PageController::PAGE_SIZE);
+		void* p2 = g_pageController.alloc(PageController::PAGE_SIZE); // generally two pages
+
+		g_pageController.release(p); // check if the page controller can handle releasing pages correctly, tested only.. via debugging? Is this even a test? Maybe...
+		g_pageController.release(p2);
+	}
+#endif
+
 #undef CHECK_ERROR
 }
