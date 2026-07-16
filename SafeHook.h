@@ -2324,7 +2324,7 @@ namespace SafeHook
 		double f64[2];
 	} XMMREG;
 
-	typedef struct
+	struct FPUx87SSE
 	{
 		struct FPUUnit
 		{
@@ -2346,6 +2346,8 @@ namespace SafeHook
 			unsigned int MXCSR_MASK;
 
 			FPUREG st[8];
+
+			int GetTop() const { return (FSW >> 11) & 0x7; }
 		} FPU;
 
 		XMMREG xmm[16];
@@ -2353,7 +2355,7 @@ namespace SafeHook
 		static_assert(sizeof(FPUUnit) == 0xA0, "FPUUnit size mismatch!");
 
 		char _padding[512 - 0xA0 - 16 * 16];
-	} FPUx87SSE;
+	};
 
 	static_assert(sizeof(FPUx87SSE) == 512, "FPUx87SSE size mismatch!");
 
@@ -2375,7 +2377,13 @@ namespace SafeHook
 		const REG esp() const { return (REG)(saved_esp.i32 + 0xC); } // you are not allowed to modify stack pointer
 
 		XMMREG& xmm(int i _In_range_(0, 7)) { return FPUandSSE.xmm[i]; }
-		FPUREG& st(int i _In_range_(0, 7)) { return FPUandSSE.FPU.st[i]; }
+		FPUREG& st(int i _In_range_(-1, 7)) 
+		{
+			if (i == -1)
+				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
+			else
+				return FPUandSSE.FPU.st[i];
+		}
 	} CTX;
 #else
 	typedef struct CTX
@@ -2403,7 +2411,13 @@ namespace SafeHook
 		const REG rsp() const { return (REG)(saved_rsp.i64 + 0x18); } // you are not allowed to modify stack pointer
 
 		XMMREG& xmm(int i _In_range_(0, 15)) { return FPUandSSE.xmm[i]; }
-		FPUREG& st(int i _In_range_(0, 7)) { return FPUandSSE.FPU.st[i]; }
+		FPUREG& st(int i _In_range_(-1, 7)) 
+		{
+			if (i == -1)
+				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
+			else
+				return FPUandSSE.FPU.st[i];
+		}
 	};
 #endif
 	// @brief Can be used in cave or in mid-function hooking
