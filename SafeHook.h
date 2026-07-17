@@ -304,6 +304,8 @@ namespace SafeHook
 		vsprintf_s(Exception::ExceptionBuffer, fmt, va);
 
 		OutputDebugStringA(Exception::ExceptionBuffer);
+
+		va_end(va);
 	}
 #endif
 
