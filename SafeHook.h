@@ -1512,36 +1512,9 @@ namespace SafeHook
 		return 0;
 	}
 
-#if SAFEHOOK_X64
-	inline unsigned long long MakeRelativeOffsetIMM64(SafeAddress src, SafeAddress dst)
+	inline uintptr_t MakeRelativeOffset(SafeAddress src, SafeAddress dst, size_t instructionSize)
 	{
-		return dst - src - 14; // 14 bytes for the mov rax, imm64 + jmp rax instructions
-	}
-#endif
-
-	inline unsigned int MakeRelativeOffsetIMM32(SafeAddress src, SafeAddress dst)
-	{
-		return dst - src - 5; // 5 bytes for the jmp instruction
-	}
-
-	inline unsigned char MakeRelativeOffsetIMM8(SafeAddress src, SafeAddress dst)
-	{
-		return dst - src - 2;
-	}
-
-	inline uintptr_t MakeRelativeOffset(SafeAddress src, SafeAddress dst)
-	{
-		size_t size = GetDistanceTypeSize(src, dst);
-
-		if (size == sizeof(uint8_t))
-			return MakeRelativeOffsetIMM8(src, dst);
-		else if (size == sizeof(uint32_t))
-			return MakeRelativeOffsetIMM32(src, dst);
-#if SAFEHOOK_X64
-		else
-			return MakeRelativeOffsetIMM64(src, dst);
-#endif
-		return 0;
+		return (uintptr_t)(dst.get() - (src.get() + instructionSize));
 	}
 
 	inline uintptr_t MakeJMP(SafeAddress src, SafeAddress dst)
@@ -1554,13 +1527,13 @@ namespace SafeHook
 			case sizeof(uint8_t) :
 			{
 				WriteMemory<unsigned char>(src, 0xEB);
-				WriteMemory<unsigned char>(src + 1, MakeRelativeOffsetIMM8(src, dst));
+				WriteMemory<unsigned char>(src + 1, (unsigned char)MakeRelativeOffset(src, dst, 2));
 				break;
 			}
 			case sizeof(uint32_t) :
 			{
 				WriteMemory<unsigned char>(src, 0xE9);
-				WriteMemory<unsigned int>(src + 1, MakeRelativeOffsetIMM32(src, dst));
+				WriteMemory<unsigned int>(src + 1, (unsigned int)MakeRelativeOffset(src, dst, 5));
 				break;
 			}
 #if SAFEHOOK_X64
@@ -1593,7 +1566,7 @@ namespace SafeHook
 			case sizeof(uint32_t) :
 			{
 				WriteMemory<unsigned char>(src, 0xE8);
-				WriteMemory<unsigned int>(src + 1, MakeRelativeOffsetIMM32(src, dst));
+				WriteMemory<unsigned int>(src + 1, (unsigned int)MakeRelativeOffset(src, dst, 5));
 				break;
 			}
 #if SAFEHOOK_X64
@@ -1786,7 +1759,7 @@ namespace SafeHook
 					{
 						WriteMemory<unsigned char>(q, 0x0F);
 						WriteMemory<unsigned char>(q + 1, p[1]);
-						WriteMemory<unsigned int>(q + 2, MakeRelativeOffsetIMM32(dst + writeOffs, dest));
+						WriteMemory<unsigned int>(q + 2, (unsigned int)MakeRelativeOffset(dst + writeOffs, dest, 6));
 
 						writeOffs += 6;
 					}
@@ -1794,7 +1767,7 @@ namespace SafeHook
 					{
 						WriteMemory<unsigned char>(q, 0x0F);
 						WriteMemory<unsigned char>(q + 1, *p + 0x10);
-						WriteMemory<unsigned int>(q + 2, MakeRelativeOffsetIMM32(dst + writeOffs, dest));
+						WriteMemory<unsigned int>(q + 2, (unsigned int)MakeRelativeOffset(dst + writeOffs, dest, 6));
 
 						writeOffs += 6;
 					}
@@ -1837,7 +1810,7 @@ namespace SafeHook
 					WriteMemory<unsigned char>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1));
 
 					uintptr_t branchDest = GetBranchDestination(p);
-					WriteMemory<uintptr_t>(q + 2, MakeRelativeOffsetIMM32(q, branchDest));
+					WriteMemory<uintptr_t>(q + 2, MakeRelativeOffset(q, branchDest, 6));
 
 					writeOffs += 6;
 				}
@@ -1846,7 +1819,7 @@ namespace SafeHook
 					uintptr_t branchDest = GetBranchDestination(p);
 
 					WriteMemory<unsigned char>(q, *p); // copy the jmp/call opcode
-					WriteMemory<unsigned int>(q + 1, MakeRelativeOffsetIMM32(q, branchDest));
+					WriteMemory<unsigned int>(q + 1, MakeRelativeOffset(q, branchDest, 5));
 
 					writeOffs += 5;
 				}
