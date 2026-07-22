@@ -2683,7 +2683,7 @@ namespace SafeHook
 				SAFEHOOK_THROW("Failed to allocate memory for hook bytes!");
 
 			memcpy(hook_bytes, asm_data, sizeof(asm_data));
-			MakeJMP(hook_bytes + sizeof(asm_data), hook_func);
+			MakeJMP(hook_bytes + sizeof(asm_data), hook_func, false);
 
 			MakeCALL(cave_address, hook_bytes);
 		}
@@ -2788,7 +2788,11 @@ namespace SafeHook
 
 				SuspendThreads(threadIds);
 
-				memset((void*)_address.get(), 0x90, orig_size);
+				{
+					scoped_unprotect unprotect(_address.get(), orig_size);
+
+					memset((void*)_address.get(), 0x90, orig_size);
+				}
 
 				MakeJMP(_address, trampoline);
 
