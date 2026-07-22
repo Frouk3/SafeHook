@@ -753,6 +753,9 @@ namespace SafeHook
 
 		T* end() { return m_last; }
 		const T* end() const { return m_last; }
+
+		T& operator[](size_t index) { return m_data[index]; }
+		const T& operator[](size_t index) const { return m_data[index]; }
 	};
 
 	inline bool EnumerateThreads(Vector<DWORD>& threadIds)
@@ -769,11 +772,13 @@ namespace SafeHook
 
 		if (Thread32First(hSnapshot, &te))
 		{
-			while ((te.th32OwnerProcessID != curProcessId || te.th32ThreadID == curThreadId) && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
+			while ((te.th32OwnerProcessID != curProcessId) && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
 
 			do
 			{
-				threadIds.push_back(te.th32ThreadID);
+				if (te.th32ThreadID != curThreadId)
+					threadIds.push_back(te.th32ThreadID);
+				
 			} while (Thread32Next(hSnapshot, &te));
 		}
 
@@ -782,23 +787,34 @@ namespace SafeHook
 		return true;
 	}
 
-	inline void SuspendThreads(const Vector<DWORD>& threadIds)
+	inline void SuspendThreads(Vector<DWORD>& threadIds)
 	{
-		for (DWORD threadId : threadIds)
+		for (int i = threadIds.size() - 1; i >= 0; --i)
 		{
+			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
 			if (hThread)
 			{
-				SuspendThread(hThread);
+				if (SuspendThread(hThread) == -1)
+				{
+					threadIds.erase(i); // Remove the thread ID from the list if it can't be opened
+					CloseHandle(hThread);
+					continue;
+				}
 				CloseHandle(hThread);
+			}
+			else
+			{
+				threadIds.erase(i); // Remove the thread ID from the list if it can't be opened
 			}
 		}
 	}
 
-	inline void ResumeThreads(const Vector<DWORD>& threadIds)
+	inline void ResumeThreads(Vector<DWORD>& threadIds)
 	{
-		for (DWORD threadId : threadIds)
+		for (int i = threadIds.size() - 1; i >= 0; --i)
 		{
+			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
 			if (hThread)
 			{
@@ -811,8 +827,9 @@ namespace SafeHook
 	inline void RedirectThreads(const Vector<DWORD>& threadIds, SafeAddress target, size_t size, SafeAddress trampoline)
 	{
 		bool doBreak = false;
-		for (DWORD threadId : threadIds)
+		for (int i = threadIds.size() - 1; i >= 0; --i)
 		{
+			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId);
 			if (hThread)
 			{
