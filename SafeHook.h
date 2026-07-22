@@ -353,6 +353,18 @@ namespace SafeHook
 #endif
 	inline constexpr size_t g_RelativeJmpInstructionSize = 5;
 
+	inline bool CheckValidAddress(SafeAddress address)
+	{
+		if (!address.get()) // address == nullptr
+			return false;
+		
+		MEMORY_BASIC_INFORMATION mbi;
+		if (VirtualQuery((LPCVOID)address.get(), &mbi, sizeof(mbi)) == 0)
+			return false;
+
+		return (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_NOACCESS) == 0);
+	}
+
 	class SafeAddress
 	{
 		uintptr_t m_address;
@@ -380,6 +392,18 @@ namespace SafeHook
 		SafeAddress& operator=(const uintptr_t& address) { m_address = address; return *this; }
 		SafeAddress& operator=(const void* address) { m_address = (uintptr_t)address; return *this; }
 		SafeAddress& operator=(const SafeAddress& other) { m_address = other.m_address; return *this; }
+
+		bool operator==(const SafeAddress& other) const { return m_address == other.m_address; }
+		bool operator!=(const SafeAddress& other) const { return m_address != other.m_address; }
+
+		bool DistRangeOf(const SafeAddress& to, size_t range) const
+		{
+			uintptr_t distance = m_address > to.m_address ? m_address - to.m_address : to.m_address - m_address;
+
+			return distance <= range;
+		}
+
+		bool IsValid() const { return CheckValidAddress(*this); }
 	};
 
 	template <typename T>
@@ -727,18 +751,89 @@ namespace SafeHook
 		const T* end() const { return m_last; }
 	};
 
-	inline bool CheckValidAddress(SafeAddress address)
+	inline bool EnumerateThreads(Vector<DWORD>& threadIds)
 	{
-		if (!address.get())
-			return false;
-		
-		MEMORY_BASIC_INFORMATION mbi;
-		if (VirtualQuery((LPCVOID)address.get(), &mbi, sizeof(mbi)) == 0)
+		DWORD curProcessId = GetCurrentProcessId();
+
+		HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		if (hSnapshot == INVALID_HANDLE_VALUE)
 			return false;
 
-		return (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_NOACCESS) == 0);
+		THREADENTRY32 te;
+		te.dwSize = sizeof(THREADENTRY32);
+
+		if (Thread32First(hSnapshot, &te))
+		{
+			while (te.th32OwnerProcessID != curProcessId && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
+
+			do
+			{
+				threadIds.push_back(te.th32ThreadID);
+			} while (Thread32Next(hSnapshot, &te));
+		}
+
+		CloseHandle(hSnapshot);
+
+		return true;
 	}
 
+	inline void SuspendThreads(const Vector<DWORD>& threadIds)
+	{
+		for (DWORD threadId : threadIds)
+		{
+			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+			if (hThread)
+			{
+				SuspendThread(hThread);
+				CloseHandle(hThread);
+			}
+		}
+	}
+
+	inline void ResumeThreads(const Vector<DWORD>& threadIds)
+	{
+		for (DWORD threadId : threadIds)
+		{
+			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
+			if (hThread)
+			{
+				ResumeThread(hThread);
+				CloseHandle(hThread);
+			}
+		}
+	}
+
+	inline void RedirectThreads(const Vector<DWORD>& threadIds, SafeAddress target, size_t size, SafeAddress trampoline)
+	{
+		bool doBreak = false;
+		for (DWORD threadId : threadIds)
+		{
+			HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId);
+			if (hThread)
+			{
+				CONTEXT ctx;
+				ctx.ContextFlags = CONTEXT_CONTROL;
+				if (GetThreadContext(hThread, &ctx))
+				{
+#if SAFEHOOK_X64
+					uintptr_t& ip = ctx.Rip;
+#else
+					DWORD& ip = ctx.Eip;
+#endif
+					// If a thread is suspended mid-prologue, recalculate its instruction pointer offset inside the trampoline
+					if (ip >= target.get() && ip < (target + size))
+					{
+						uintptr_t offset = ip - target.get();
+						ip = trampoline + offset;
+						SetThreadContext(hThread, &ctx);
+					}
+				}
+				CloseHandle(hThread);
+			}
+		}
+	}
+
+	// Redirects all threads in the current process to a trampoline if they are currently executing inside the target function. Assuming the target function won't be called again after this function is called.
 	inline void ThreadRedirect(SafeAddress target, size_t size, SafeAddress trampoline)
 	{
 		DWORD curThreadId = GetCurrentThreadId();
@@ -1065,18 +1160,16 @@ namespace SafeHook
 				if (!size)
 					return false;
 
-				while (true)
+				// while (range(from, base) <= 0x7FFF0000) { ...; base += mbi.RegionSize; }
+				for (SafeAddress base = from; from.DistRangeOf(base, 0x7FFF0000); )
 				{
-					MEMORY_BASIC_INFORMATION mbi;
-					if (!VirtualQuery((void*)from.get(), &mbi, sizeof(mbi)))
-						return false;
-
-					if (GetDistanceTypeSize(from, SafeAddress(mbi.BaseAddress)) > sizeof(uint32_t)) // too far away
+					MEMORY_BASIC_INFORMATION mbi{0};
+					if (!VirtualQuery((LPCVOID)base.get(), &mbi, sizeof(mbi)))
 						return false;
 
 					if (mbi.State == MEM_FREE && mbi.RegionSize >= size)
 					{
-						m_baseAddress = VirtualAlloc(mbi.BaseAddress, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+						m_baseAddress = VirtualAlloc((LPVOID)base.get(), size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 						if (!m_baseAddress)
 							return false;
 
@@ -1088,10 +1181,14 @@ namespace SafeHook
 						{
 							Page page;
 							page.init((void*)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+
 							m_pages.push_back(std::move(page));
 						}
+
 						return true;
 					}
+
+					base += (uintptr_t)mbi.RegionSize;
 				}
 
 				return false;
@@ -1289,9 +1386,9 @@ namespace SafeHook
 
 	class scoped_unprotect
 	{
-		DWORD old_protect;
 		SafeAddress address;
 		size_t size;
+		DWORD old_protect;
 	public:
 		scoped_unprotect() : old_protect(0), address(uintptr_t(0)), size(0) {}
 
@@ -1331,56 +1428,143 @@ namespace SafeHook
 		}
 	};
 
-	inline void MemoryFill(SafeAddress address, unsigned char value, size_t size)
+	class scoped_slim_lock
 	{
-		scoped_unprotect unprotect(address.get(), size);
+		PSRWLOCK m_lock;
+	public:
+		scoped_slim_lock(PSRWLOCK lock) : m_lock(lock)
+		{
+			if (m_lock)
+				AcquireSRWLockExclusive(m_lock);
+		}
 
-		memset((void*)address.get(), value, size);
+		~scoped_slim_lock()
+		{
+			if (m_lock)
+				ReleaseSRWLockExclusive(m_lock);
+		}
+	};
+
+	class scoped_slim_lock_shared
+	{
+		PSRWLOCK m_lock;
+	public:
+		scoped_slim_lock_shared(PSRWLOCK lock) : m_lock(lock)
+		{
+			if (m_lock)
+				AcquireSRWLockShared(m_lock);
+		}
+
+		~scoped_slim_lock_shared()
+		{
+			if (m_lock)
+				ReleaseSRWLockShared(m_lock);
+		}
+	};
+
+	inline SRWLOCK g_slimLock = SRWLOCK_INIT;
+
+	// Executes a function while holding a slim lock to ensure thread safety and prevent race conditions.
+	template <typename T>
+	SAFEHOOK_FORCEINLINE void Sync(T func)
+	{
+		scoped_slim_lock scopedLock(&g_slimLock);
+		func();
 	}
 
-	template <typename T>
-	inline void WriteObject(SafeAddress address, const T& object)
+	// Fills a memory region with the specified value. If vp is true, it temporarily unprotects the memory region to allow writing.
+	SAFEHOOK_FORCEINLINE void MemoryFill(SafeAddress address, unsigned char value, size_t size, bool vp = true)
 	{
-		scoped_unprotect unprotect(address.get(), sizeof(T));
-
-		*(T*)address.get() = object;
-	}
-
-	template <typename T>
-	inline void WriteMemory(SafeAddress address, T value, bool vp = true)
-	{
-		scoped_unprotect x;
-
 		if (vp)
-			x.protect(address.get(), sizeof(T));
+		{
+			scoped_unprotect unprotect(address.get(), size);
 
-		*(T*)address.get() = value;
+			memset((void*)address.get(), value, size);
+		}
+		else
+		{
+			memset((void*)address.get(), value, size);
+		}
 	}
 
-	inline void WriteMemoryRaw(SafeAddress address, const void* data, size_t size)
-	{
-		scoped_unprotect unprotect(address.get(), size);
-
-		memcpy((void*)address.get(), data, size);
-	}
-
+	// Writes an object of type T to the specified address. If vp is true, it temporarily unprotects the memory region to allow writing.
 	template <typename T>
-	inline T ReadMemory(SafeAddress address, bool vp = true)
+	SAFEHOOK_FORCEINLINE void WriteObject(SafeAddress address, const T& object, bool vp = true)
 	{
-		scoped_unprotect x;
 		if (vp)
-			x.protect(address.get(), sizeof(T));
+		{
+			scoped_unprotect unprotect(address.get(), sizeof(T));
 
-		return *(T*)address.get();
+			memcpy((void*)address.get(), &object, sizeof(T));
+		}
+		else
+		{
+			memcpy((void*)address.get(), &object, sizeof(T));
+		}
 	}
 
-	inline void ReadMemoryRaw(SafeAddress address, void* data, size_t size)
+	// Writes a value of type T to the specified address. If vp is true, it temporarily unprotects the memory region to allow writing.
+	template <typename T>
+	SAFEHOOK_FORCEINLINE void WriteMemory(SafeAddress address, T value, bool vp = true)
 	{
-		scoped_unprotect unprotect(address.get(), size);
+		if (vp)
+		{
+			scoped_unprotect unprotect(address.get(), sizeof(T));
 
-		memcpy(data, (void*)address.get(), size);
+			*(T*)address.get() = value;
+		}
+		else
+		{
+			*(T*)address.get() = value;
+		}
 	}
 
+	// Writes raw memory to the specified address from the provided data buffer. If vp is true, it temporarily unprotects the memory region to allow writing.
+	SAFEHOOK_FORCEINLINE void WriteMemoryRaw(SafeAddress address, const void* data, size_t size, bool vp = true)
+	{
+		if (vp)
+		{
+			scoped_unprotect unprotect(address.get(), size);
+
+			memcpy((void*)address.get(), data, size);
+		}
+		else
+		{
+			memcpy((void*)address.get(), data, size);
+		}
+	}
+
+	// Reads a value of type T from the specified address. If vp is true, it temporarily unprotects the memory region to allow reading.
+	template <typename T>
+	SAFEHOOK_FORCEINLINE T ReadMemory(SafeAddress address, bool vp = true)
+	{
+		if (vp)
+		{
+			scoped_unprotect unprotect(address.get(), sizeof(T));
+
+			return *(T*)address.get();
+		}
+		else
+		{
+			return *(T*)address.get();
+		}
+	}
+
+	// Reads raw memory from the specified address into the provided data buffer. If vp is true, it temporarily unprotects the memory region to allow reading.
+	SAFEHOOK_FORCEINLINE void ReadMemoryRaw(SafeAddress address, void* data, size_t size, bool vp = true)
+	{
+		if (vp)
+		{
+			scoped_unprotect unprotect(address.get(), size);
+			memcpy(data, (void*)address.get(), size);
+		}
+		else
+		{
+			memcpy(data, (void*)address.get(), size);
+		}
+	}
+
+	// An RAII utility class that backs up a memory region upon construction and restores it upon destruction. It can be used to temporarily modify memory and ensure it is restored to its original state.
 	class scoped_backup
 	{
 		SafeAddress address;
@@ -1428,7 +1612,7 @@ namespace SafeHook
 			{
 				if (bCheck)
 				{
-					if (!CheckValidAddress(address))
+					if (!address.IsValid())
 						return;
 				}
 				
@@ -1452,59 +1636,62 @@ namespace SafeHook
 		friend class Hook;
 	};
 
+	// Get the destination address of a branch instruction (jmp, call, etc.) at the given address.
 	inline uintptr_t GetBranchDestination(SafeAddress address)
 	{
 		hde_s disasm = { 0 };
-		HDE_DISASM((unsigned char*)(address.get()), &disasm);
+		HDE_DISASM((uint8_t*)(address.get()), &disasm);
 		CHECK_ERROR(disasm);
 
 		if (disasm.flags & F_RELATIVE)
 		{
 			switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
 			{
-			case F_IMM8:
-				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm8);
-			case F_IMM16:
-				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm16);
-			case F_IMM32:
-				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm32);
+				case F_IMM8:
+					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm8);
+				case F_IMM16:
+					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm16);
+				case F_IMM32:
+					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm32);
 #if SAFEHOOK_X64
-			case F_IMM64:
-				return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm64); // thinking about it, how can we have relative with 8 bytes long pointer?
+				case F_IMM64:
+					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm64); // thinking about it, how can we have relative with 8 bytes long pointer?
 #endif
-			default:
-				break;
+				default:
+					break;
 			}
 		}
 		else
 		{
+#if SAFEHOOK_X64 // x86 HAS far jumps, I don't think anyone would just go into kernel space and make hooks in there, playing with fire you know
 			if (disasm.opcode == 0xFF && disasm.flags & F_MODRM)
 			{
 				switch (disasm.modrm & 0x38)
 				{
-				case 0x10: // call
-				case 0x20: // jmp
-					return *(uintptr_t*)(address.get() + disasm.len + disasm.imm.imm32);
-				default:
-					break;
+					case 0x10: // call
+					case 0x20: // jmp
+						return *(uintptr_t*)(address.get() + disasm.len + disasm.imm.imm32);
+					default:
+						break;
 				}
 			}
 			else
+#endif
 			{
 				switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
 				{
-				case F_IMM8:
-					return disasm.imm.imm8;
-				case F_IMM16:
-					return disasm.imm.imm16;
-				case F_IMM32:
-					return disasm.imm.imm32;
+					case F_IMM8:
+						return disasm.imm.imm8;
+					case F_IMM16:
+						return disasm.imm.imm16;
+					case F_IMM32:
+						return disasm.imm.imm32;
 #if SAFEHOOK_X64
-				case F_IMM64:
-					return disasm.imm.imm64;
+					case F_IMM64:
+						return disasm.imm.imm64;
 #endif
-				default:
-					break;
+					default:
+						break;
 				}
 			}
 		}
@@ -1512,38 +1699,51 @@ namespace SafeHook
 		return 0;
 	}
 
-	inline uintptr_t MakeRelativeOffset(SafeAddress src, SafeAddress dst, size_t instructionSize)
+	// Make a relative offset from the source address to the destination address, taking into account the size of the instruction.
+	SAFEHOOK_FORCEINLINE uintptr_t MakeRelativeOffset(SafeAddress src, SafeAddress dst, size_t instructionSize)
 	{
 		return (uintptr_t)(dst.get() - (src.get() + instructionSize));
 	}
 
-	inline uintptr_t MakeJMP(SafeAddress src, SafeAddress dst)
+	// Make a jump in the source address to the destination address. Returns the previous destination of the jump.
+	inline uintptr_t MakeJMP(SafeAddress src, SafeAddress dst, bool vp = true)
 	{
 		uintptr_t prev = GetBranchDestination(src);
 		size_t typeSize = GetDistanceTypeSize(src, dst);
 
+		scoped_unprotect x;
+
 		switch (typeSize)
 		{
-			case sizeof(uint8_t) :
+			case sizeof(uint8_t):
 			{
-				WriteMemory<unsigned char>(src, 0xEB);
-				WriteMemory<unsigned char>(src + 1, (unsigned char)MakeRelativeOffset(src, dst, 2));
+				if (vp)
+					x.protect(src.get(), 2);
+
+				WriteMemory<uint8_t>(src, 0xEB, false);
+				WriteMemory<uint8_t>(src + 1, (uint8_t)MakeRelativeOffset(src, dst, 2), false);
 				break;
 			}
 			case sizeof(uint32_t) :
 			{
-				WriteMemory<unsigned char>(src, 0xE9);
-				WriteMemory<unsigned int>(src + 1, (unsigned int)MakeRelativeOffset(src, dst, 5));
+				if (vp)
+					x.protect(src.get(), 5);
+
+				WriteMemory<uint8_t>(src, 0xE9, false);
+				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
 				break;
 			}
 #if SAFEHOOK_X64
 			case sizeof(uint64_t) :
 			{
-				WriteMemory<unsigned char>(src, 0xFF);
-				WriteMemory<unsigned char>(src + 1, 0x25);
-				WriteMemory<unsigned int>(src + 2, 0);
+				if (vp)
+					x.protect(src.get(), 14);
 
-				WriteMemory<uint64_t>(src + 6, dst.get());
+				WriteMemory<uint8_t>(src, 0xFF, false);
+				WriteMemory<uint8_t>(src + 1, 0x25, false);
+				WriteMemory<uint32_t>(src + 2, 0, false);
+
+				WriteMemory<uint64_t>(src + 6, dst.get(), false);
 				break;
 			}
 #endif
@@ -1555,28 +1755,37 @@ namespace SafeHook
 		return prev;
 	}
 
-	inline uintptr_t MakeCALL(SafeAddress src, SafeAddress dst)
+	// Make a call in the source address to the destination address. Returns the previous destination of the call.
+	inline uintptr_t MakeCALL(SafeAddress src, SafeAddress dst, bool vp = true)
 	{
 		uintptr_t prev = GetBranchDestination(src);
 		size_t typeSize = GetDistanceTypeSize(src, dst);
+
+		scoped_unprotect x;
 
 		switch (typeSize)
 		{
 			case sizeof(uint8_t) :
 			case sizeof(uint32_t) :
 			{
-				WriteMemory<unsigned char>(src, 0xE8);
-				WriteMemory<unsigned int>(src + 1, (unsigned int)MakeRelativeOffset(src, dst, 5));
+				if (vp)
+					x.protect(src.get(), 5);
+
+				WriteMemory<uint8_t>(src, 0xE8, false);
+				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
 				break;
 			}
 #if SAFEHOOK_X64
 			case sizeof(uint64_t) :
 			{
-				WriteMemory<unsigned char>(src, 0xFF);
-				WriteMemory<unsigned char>(src + 1, 0x15);
-				WriteMemory<unsigned int>(src + 2, 0); // CALL [RIP+0]
+				if (vp)
+					x.protect(src.get(), 14);
 
-				WriteMemory<uint64_t>(src + 6, dst.get());
+				WriteMemory<uint8_t>(src, 0xFF, false);
+				WriteMemory<uint8_t>(src + 1, 0x15, false);
+				WriteMemory<uint32_t>(src + 2, 0, false); // CALL [RIP+0]
+
+				WriteMemory<uint64_t>(src + 6, dst.get(), false);
 
 				break;
 			}
@@ -1589,32 +1798,35 @@ namespace SafeHook
 		return prev;
 	}
 
-	inline void MakeNOP(SafeAddress address, size_t size)
+	// Makes NOPs (no-operation instructions) in the specified memory region. The size parameter specifies how many bytes to fill with NOPs. If vp is true, it temporarily unprotects the memory region to allow writing.
+	SAFEHOOK_FORCEINLINE void MakeNOP(SafeAddress address, size_t size, bool vp = true)
 	{
-		MemoryFill(address, 0x90, size);
+		MemoryFill(address, 0x90, size, vp);
 	}
 
-	inline void MakeRangedNOP(SafeAddress src, SafeAddress dst)
+	// Makes NOPs (no-operation instructions) in the memory region from src to dst. The size of the region is calculated as dst - src. If vp is true, it temporarily unprotects the memory region to allow writing.
+	SAFEHOOK_FORCEINLINE void MakeRangedNOP(SafeAddress src, SafeAddress dst, bool vp = true)
 	{
-		MakeNOP(src, dst - src);
+		MakeNOP(src, dst - src, vp);
 	}
 
-	inline void MakeRET(SafeAddress address, int pop = 0)
+	// Makes a RET (return) instruction at the specified address. If pop is greater than 0, it will also pop the specified number of bytes from the stack before returning. If vp is true, it temporarily unprotects the memory region to allow writing.
+	SAFEHOOK_FORCEINLINE void MakeRET(SafeAddress address, int pop = 0)
 	{
 		scoped_unprotect unprotect(address.get(), 1 + (pop ? 2 : 0));
 		if (pop)
 		{
-			WriteMemory<unsigned char>(address, 0xC2, false);
-			WriteMemory<unsigned short>(address + 1, pop, false);
+			WriteMemory<uint8_t>(address, 0xC2, false);
+			WriteMemory<uint16_t>(address + 1, pop, false);
 		}
 		else
 		{
-			WriteMemory<unsigned char>(address, 0xC3, false);
+			WriteMemory<uint8_t>(address, 0xC3, false);
 		}
 	}
 
 	// whenether there's tricks in assembly that would make hde disassembler fail, we can use this function to safely skip over the instruction and get the next instruction address
-	inline size_t HdeCheckOffsetFor(hde_s* disasm)
+	SAFEHOOK_FORCEINLINE size_t HdeCheckOffsetFor(hde_s* disasm)
 	{
 #if SAFEHOOK_X64
 		if (disasm->opcode == 0xFF && disasm->flags & F_MODRM)
@@ -1632,31 +1844,29 @@ namespace SafeHook
 		return disasm->len;
 	}
 
-	inline size_t GetTrampolineSize(SafeAddress src) // cannot really depend on trampoline placement here...
+	// Returns assumed size of the trampoline, which is the number of bytes needed to copy from the source address to create a trampoline. This function disassembles the instructions at the source address until it has enough bytes to accommodate a jump instruction.
+	inline size_t GetTrampolineSize(SafeAddress src)
 	{
+		// cannot really depend on an non-existent trampoline...
+
 		hde_s disasm = { 0 };
 		size_t readOffs = 0;
 		size_t size = 0;
 
 		while (readOffs < g_JmpInstructionSize)
 		{
-			HDE_DISASM((unsigned char*)src.get() + readOffs, &disasm);
+			HDE_DISASM((uint8_t*)src.get() + readOffs, &disasm);
 			CHECK_ERROR(disasm);
 
-			unsigned char *p = (unsigned char*)src.get() + readOffs;
+			uint8_t *p = (uint8_t*)src.get() + readOffs;
 			if ((*p >= 0x70 && *p <= 0x7F))
 			{
 				size += 6; // jcc rel8 -> jcc rel32
 #if SAFEHOOK_X64
-				if (GetDistanceTypeSize(src + readOffs, src + readOffs + 6) == sizeof(uint64_t))
-					SAFEHOOK_REPORT_HERE("Jcc does not support 64-bit relative offsets!");
+				// hope that the trampoline won't get too far away
 #endif
 			}
-			else if (*p == 0xE9 || *p == 0xE8)
-			{
-				size += SAFEHOOK_BY_ARCH(5, 14);
-			}
-			else if (*p == 0xEB)
+			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
 				size += SAFEHOOK_BY_ARCH(5, 14);
 			}
@@ -1679,7 +1889,7 @@ namespace SafeHook
 		return size;
 	}
 
-	inline size_t GetByteCodeLength(unsigned char* src, size_t minLength)
+	inline size_t GetByteCodeLength(uint8_t* src, size_t minLength)
 	{
 		hde_s disasm = { 0 };
 		size_t readOffs = 0;
@@ -1700,7 +1910,7 @@ namespace SafeHook
 	}
 
 	// Used to make a trampoline in dst, if the dst is null it will calculate how much bytes is the src
-	inline size_t CreateTrampoline(unsigned char* src, unsigned char* dst = nullptr, size_t* tramp_size = nullptr)
+	inline size_t CreateTrampoline(uint8_t* src, uint8_t* dst, size_t* tramp_size = nullptr)
 	{
 		hde_s disasm = { 0 };
 		size_t writeOffs = 0;
@@ -1708,31 +1918,9 @@ namespace SafeHook
 
 		// scoped_unprotect unprotect((size_t)src, 32); // unprotect the source memory so we can read and write to it safely
 		// pretty sure that page is already available for reading, so commenting this out for now
-
-		size_t jmpInstruction = 0;
-		switch (GetDistanceTypeSize(src, dst))
-		{
-			case sizeof(uint8_t) :
-			{
-				jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
-				break;
-			}
-			case sizeof(uint32_t) :
-			{
-				jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
-				break;
-			}
-#if SAFEHOOK_X64
-			case sizeof(uint64_t) :
-			{
-				jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
-				break;
-			}
-#endif
-			default:
-				 // SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
-				break;
-		};
+		// we should also not use vp here, trampoline should be already allocated with write permission, just not to cause overhead
+		// also, we should be fast here, VirtualProtect has an overhead
+		// if you are reading this, use writing without virtual protect, we should be fast, not being a slowpoke
 
 		if (!dst)
 		{
@@ -1740,107 +1928,140 @@ namespace SafeHook
 		}
 		else
 		{
+			size_t jmpInstruction = 0;
+			switch (GetDistanceTypeSize(src, dst))
+			{
+				case sizeof(uint8_t) :
+				{
+					jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
+					break;
+				}
+				case sizeof(uint32_t) :
+				{
+					jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
+					break;
+				}
+#if SAFEHOOK_X64
+				case sizeof(uint64_t) :
+				{
+					jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
+					break;
+				}
+#endif
+				default:
+					// SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
+					break;
+			}
+
 			while (readOffs < jmpInstruction)
 			{
 				HDE_DISASM(src + readOffs, &disasm);
 				CHECK_ERROR(disasm);
 
-				unsigned char* p = src + readOffs;
-				unsigned char* q = dst + writeOffs;
-#if SAFEHOOK_X64
+				uint8_t* p = src + readOffs;
+				uint8_t* q = dst + writeOffs;
+
 				size_t typeSize = GetDistanceTypeSize(p, dst + writeOffs);
+				
 				if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (*(p + 1) >= 0x80 && *(p + 1) <= 0x8F)))
 				{
-					uintptr_t dest = GetBranchDestination(p);
+					uintptr_t branchDest = GetBranchDestination(p);
+#if SAFEHOOK_X64
 					if (typeSize == sizeof(uint64_t))
 						SAFEHOOK_THROW("Jcc does not support 64-bit relative offsets!");
+#endif
+					WriteMemory<uint8_t>(q, 0x0F, false);
+					WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1), false);
 
-					if (*p == 0x0F)
-					{
-						WriteMemory<unsigned char>(q, 0x0F);
-						WriteMemory<unsigned char>(q + 1, p[1]);
-						WriteMemory<unsigned int>(q + 2, (unsigned int)MakeRelativeOffset(dst + writeOffs, dest, 6));
-
-						writeOffs += 6;
-					}
-					else
-					{
-						WriteMemory<unsigned char>(q, 0x0F);
-						WriteMemory<unsigned char>(q + 1, *p + 0x10);
-						WriteMemory<unsigned int>(q + 2, (unsigned int)MakeRelativeOffset(dst + writeOffs, dest, 6));
-
-						writeOffs += 6;
-					}
-				}
-				else if (*p == 0xE9 || *p == 0xE8) // jmp or call
-				{
-					uintptr_t dest = GetBranchDestination(p);
-
-					if (*p == 0xE9)
-						MakeJMP(q, dest);
-					else
-						MakeCALL(q, dest);
-
-					if (typeSize == sizeof(uint64_t))
-						writeOffs += 14;
-					else
-						writeOffs += 5;
-				}
-				else if (*p == 0xEB)
-				{
-					uintptr_t branchDest = GetBranchDestination(p);
-
-					MakeJMP(q, branchDest);
-					if (typeSize == sizeof(uint64_t))
-						writeOffs += 14;
-					else
-						writeOffs += 5;
-				}
-				else
-				{
-					disasm.len = HdeCheckOffsetFor(&disasm);
-
-					memcpy(dst + writeOffs, src + readOffs, disasm.len);
-					writeOffs += disasm.len;
-				}
-#else
-				if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (*(p + 1) >= 0x80 && *(p + 1) <= 0x8F)))
-				{
-					WriteMemory<unsigned char>(q, (unsigned char)0x0F);
-					WriteMemory<unsigned char>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1));
-
-					uintptr_t branchDest = GetBranchDestination(p);
-					WriteMemory<uintptr_t>(q + 2, MakeRelativeOffset(q, branchDest, 6));
+					WriteMemory<uint32_t>(q + 2, (uint32_t)MakeRelativeOffset(q, branchDest, 6), false);
 
 					writeOffs += 6;
 				}
-				else if (*p == 0xE9 || *p == 0xE8) // jmp or call
+				else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 				{
 					uintptr_t branchDest = GetBranchDestination(p);
 
-					WriteMemory<unsigned char>(q, *p); // copy the jmp/call opcode
-					WriteMemory<unsigned int>(q + 1, MakeRelativeOffset(q, branchDest, 5));
+#if SAFEHOOK_X64
+					if (typeSize == sizeof(uint64_t))
+					{
+						WriteMemory<uint8_t>(q, 0xFF, false);
+						WriteMemory<uint8_t>(q + 1, *p == 0xE8 ? 0x15 : 0x25, false); // call or jmp
+						WriteMemory<uint32_t>(q + 2, 0, false); // RIP relative addressing
+
+						WriteMemory<uint64_t>(q + 6, branchDest, false);
+
+						writeOffs += 14;
+					}
+					else
+					{
+						if (*p != 0xEB) // jmp or call
+						{
+							WriteMemory<uint8_t>(q, *p, false); // copy the jmp/call opcode
+							WriteMemory<uint32_t>(q + 1, MakeRelativeOffset(q, branchDest, 5), false);
+						}
+						else // jmp short
+						{
+							WriteMemory<uint8_t>(q, 0xE9, false); // convert to jmp long
+							WriteMemory<uint32_t>(q + 1, MakeRelativeOffset(q, branchDest, 5), false);
+						}
+
+						writeOffs += 5;
+					}
+#else
+					if (*p != 0xEB) // jmp or call
+					{
+						WriteMemory<uint8_t>(q, *p, false); // copy the jmp/call opcode
+						WriteMemory<uint32_t>(q + 1, MakeRelativeOffset(q, branchDest, 5), false);
+					}
+					else // jmp short
+					{
+						WriteMemory<uint8_t>(q, 0xE9, false); // convert to jmp long
+						WriteMemory<uint32_t>(q + 1, MakeRelativeOffset(q, branchDest, 5), false);
+					}
 
 					writeOffs += 5;
+#endif
 				}
-				else if (*p == 0xEB) // since it's a trampoline, we will upgrade it into imm32
+#if SAFEHOOK_X64
+				else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05) // RIP relative addressing
 				{
-					uintptr_t branchDest = GetBranchDestination(p);
+					uint32_t oldDisp = disasm.disp.disp32;
+					
+					uint64_t absTarget = (uint64_t)(p + disasm.len + oldDisp);
+					int64_t newDisp = absTarget - (uint64_t)(q + disasm.len);
 
-					MakeJMP(q, branchDest);
-					writeOffs += 5;
+					if (newDisp > INT32_MAX || newDisp < INT32_MIN)
+						SAFEHOOK_REPORT_HERE("Displacement is too far for RIP relative addressing! %p -> %p", p, q);
+
+					uint8_t immSize = 0;
+					memcpy(dst + writeOffs, src + readOffs, disasm.len);
+					switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | F_IMM64))
+					{
+						case F_IMM8: immSize = 1; break;
+						case F_IMM16: immSize = 2; break;
+						case F_IMM32: immSize = 4; break;
+						case F_IMM64: immSize = 8; break;
+						default:
+							break;
+					}
+
+					uint32_t dispOffset = disasm.len - immSize - 4;
+
+					*(int32_t*)(q + dispOffset) = (int32_t)newDisp;
+
+					writeOffs += disasm.len;
 				}
+#endif
 				else
 				{
 					memcpy(dst + writeOffs, src + readOffs, disasm.len);
 					writeOffs += disasm.len;
 				}
-#endif
 				readOffs += disasm.len;
 			}
 		}
 
-		MakeJMP(dst + writeOffs, src + readOffs); // jmp back to the original routine after the overwritten bytes
+		MakeJMP(dst + writeOffs, src + readOffs, false); // jmp back to the original routine after the overwritten bytes
 
 		if (tramp_size)
 			*tramp_size = writeOffs;
@@ -1850,8 +2071,8 @@ namespace SafeHook
 
 	class Hook
 	{
-		unsigned char* m_target;
-		unsigned char* m_hook;
+		uint8_t* m_target;
+		uint8_t* m_hook;
 		size_t m_trampolineSize;
 
 		struct
@@ -1860,14 +2081,14 @@ namespace SafeHook
 			{
 				struct
 				{
-					unsigned int bEnabled : 1;
-					unsigned int bTrampolineCreated : 1;
-					unsigned int bTrampolineLinked : 1;
+					uint32_t bEnabled : 1;
+					uint32_t bTrampolineCreated : 1;
+					uint32_t bTrampolineLinked : 1;
 				};
-				unsigned int i32;
+				uint32_t i32;
 			};
 		} m_state;
-		unsigned char* m_trampoline;
+		uint8_t* m_trampoline;
 		scoped_backup m_originalBytes;
 
 		void CreateTrampoline()
@@ -1875,7 +2096,7 @@ namespace SafeHook
 			if (!m_state.bTrampolineCreated)
 			{
 				size_t trampolineSize = GetTrampolineSize(m_target);
-				// scary thing here is that original function code might be 3-4 bytes long, and knowing how sections are operated, we might end up spoiling the next function's code
+				// scary thing here is that original function code might be 3-4 bytes long, and knowing how sections are operated, we might end up spoiling the next function's code if we are working with no alignment code
 				m_originalBytes.store(m_target, GetByteCodeLength(m_target, 5)); // try relative first
 
 				void* pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 14), g_pageController.allocNear(m_target, trampolineSize + 14)); // 14 to be certain for x64 and x86
@@ -1955,10 +2176,21 @@ namespace SafeHook
 			m_state.bEnabled = true;
 			if (m_state.bTrampolineCreated && !m_state.bTrampolineLinked)
 			{
-				ThreadRedirect(m_target, m_originalBytes.size, m_trampoline);
-				scoped_unprotect unprotect(m_target, m_originalBytes.size);
+				Sync([&]()
+				{
+					Vector<DWORD> threadIds;
+					EnumerateThreads(threadIds);
+					
+					SuspendThreads(threadIds);
+					scoped_unprotect unprotect(m_target, m_originalBytes.size);
 
-				MakeJMP(m_target, m_hook);
+					MakeJMP(m_target, m_hook, false);
+					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
+
+					RedirectThreads(threadIds, m_target, m_originalBytes.size, m_trampoline);
+
+					ResumeThreads(threadIds);
+				});
 
 				m_state.bTrampolineLinked = true;
 			}
@@ -1969,7 +2201,20 @@ namespace SafeHook
 			m_state.bEnabled = false;
 			if (m_state.bTrampolineCreated && m_state.bTrampolineLinked)
 			{
-				m_originalBytes.restore(false); // Must ensure that address is valid
+				Sync([&]()
+				{
+					Vector<DWORD> threadIds;
+					EnumerateThreads(threadIds);
+
+					SuspendThreads(threadIds);
+
+					m_originalBytes.restore(false); // Must ensure that address is valid
+					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
+
+					// Redirection is not required when disabling the hook
+
+					ResumeThreads(threadIds);
+				});
 
 				m_state.bTrampolineLinked = false;
 			}
@@ -2114,6 +2359,7 @@ namespace SafeHook
 		};
 	};
 
+#if SAFEHOOK_X64
 	union RFLAGS
 	{
 		unsigned long long i64;
@@ -2150,6 +2396,7 @@ namespace SafeHook
 			unsigned long long Reserved32 : 32; // Reserved bits for 64-bit mode
 		};
 	};
+#endif
 
 	typedef struct FPUREG
 	{
@@ -2449,7 +2696,7 @@ namespace SafeHook
 		void handleTrampoline(uintptr_t _address, size_t& orig_size),
 		void handleTrampoline(uintptr_t _address, size_t& orig_size, bool bTryAllocNear = true))
 		{
-			size_t orignal_size = CreateTrampoline((unsigned char*)_address, nullptr);
+			size_t orignal_size = GetTrampolineSize(_address);
 
 #if SAFEHOOK_X64
 			if (bTryAllocNear)
@@ -2512,15 +2759,22 @@ namespace SafeHook
 			SAFEHOOK_CATCH_RET(e);
 			// we need to proceed with the "MidAsmHookUnsafe" before it is connected to the main routine, if we do it after, we might run into unhandled exception
 
-			scoped_unprotect unprotect(_address.get(), orig_size);
+			Sync([&]()
 			{
-				ThreadRedirect(_address, orig_size, trampoline); // make sure no other thread is executing the original code while we are modifying it, this will prevent crashes and undefined behavior
-				// we got the trampoline ready for executing hook_func along with original instructions, so redirection logically must continue executing in the trampoline along with calling our hook immediately
+				Vector<DWORD> threadIds;
+				EnumerateThreads(threadIds);
+
+				SuspendThreads(threadIds);
 
 				memset((void*)_address.get(), 0x90, orig_size);
 
 				MakeJMP(_address, trampoline);
-			}
+
+				RedirectThreads(threadIds, _address.get(), orig_size, trampoline);
+				FlushInstructionCache(GetCurrentProcess(), (void*)_address.get(), orig_size);
+
+				ResumeThreads(threadIds);
+			});
 
 			// basically
 			// call hook_wrapper
