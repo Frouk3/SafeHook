@@ -353,17 +353,9 @@ namespace SafeHook
 #endif
 	inline constexpr size_t g_RelativeJmpInstructionSize = 5;
 
-	inline bool CheckValidAddress(SafeAddress address)
-	{
-		if (!address.get()) // address == nullptr
-			return false;
-		
-		MEMORY_BASIC_INFORMATION mbi;
-		if (VirtualQuery((LPCVOID)address.get(), &mbi, sizeof(mbi)) == 0)
-			return false;
+	class SafeAddress;
 
-		return (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_NOACCESS) == 0);
-	}
+	inline bool CheckValidAddress(SafeAddress x);
 
 	class SafeAddress
 	{
@@ -405,6 +397,18 @@ namespace SafeHook
 
 		bool IsValid() const { return CheckValidAddress(*this); }
 	};
+
+	inline bool CheckValidAddress(SafeAddress address)
+	{
+		if (!address.get()) // address == nullptr
+			return false;
+
+		MEMORY_BASIC_INFORMATION mbi;
+		if (VirtualQuery((LPCVOID)address.get(), &mbi, sizeof(mbi)) == 0)
+			return false;
+
+		return (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_NOACCESS) == 0);
+	}
 
 	template <typename T>
 	class Vector
