@@ -758,6 +758,7 @@ namespace SafeHook
 	inline bool EnumerateThreads(Vector<DWORD>& threadIds)
 	{
 		DWORD curProcessId = GetCurrentProcessId();
+		DWORD curThreadId = GetCurrentThreadId();
 
 		HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 		if (hSnapshot == INVALID_HANDLE_VALUE)
@@ -768,7 +769,7 @@ namespace SafeHook
 
 		if (Thread32First(hSnapshot, &te))
 		{
-			while (te.th32OwnerProcessID != curProcessId && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
+			while ((te.th32OwnerProcessID != curProcessId || te.th32ThreadID == curThreadId) && Thread32Next(hSnapshot, &te)) { (void)0; }; // Skip threads that don't belong to the current process
 
 			do
 			{
