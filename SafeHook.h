@@ -2140,7 +2140,6 @@ namespace SafeHook
 	// This would cleanup every hook that was created, thus forceful shutting down is easier
 	inline void CleanupHooks()
 	{
-		scoped_slim_lock scopedLock(&g_slimLock);
 		while (g_trackHooks)
 		{
 			cTrackHook* pNext = g_trackHooks->m_next;
