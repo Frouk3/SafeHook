@@ -2113,9 +2113,8 @@ namespace SafeHook
 		{
 			if (m_hook)
 			{
-				Hook* hook = (Hook*)m_hook;
-				if (hook->valid())
-					hook->Disable();
+				class Hook* hook = (class Hook*)m_hook;
+				((void(__thiscall*)(class Hook*))**(void***)hook)(hook);
 			}
 		}
 	};
@@ -2129,8 +2128,8 @@ namespace SafeHook
 		{
 			if (m_hook)
 			{
-				MidAsmHook* hook = (MidAsmHook*)m_hook;
-				hook->~MidAsmHook();
+				class MidAsmHook* hook = (class MidAsmHook*)m_hook;
+				((void(__thiscall*)(class MidAsmHook*))**(void***)hook)(hook);
 			}
 		}
 	};
@@ -2138,7 +2137,7 @@ namespace SafeHook
 	inline cTrackHook* g_trackHooks = nullptr;
 
 	// This would cleanup every hook that was created, thus forceful shutting down is easier
-	void CleanupHooks()
+	inline void CleanupHooks()
 	{
 		while (g_trackHooks)
 		{
@@ -2330,6 +2329,11 @@ namespace SafeHook
 			m_target = m_hook = nullptr;
 			m_trampolineSize = 0;
 			m_state.i32 = 0;
+		}
+
+		virtual void OnDestruct() 
+		{
+			this->~Hook();
 		}
 	};
 
@@ -2883,6 +2887,11 @@ namespace SafeHook
 			}
 
 			// unsafe_hook will automatically destruct itself
+		}
+
+		virtual void OnDestruct()
+		{
+			this->~MidAsmHook();
 		}
 	};
 
