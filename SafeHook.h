@@ -1656,6 +1656,7 @@ namespace SafeHook
 		}
 
 		friend class Hook;
+		friend class MidAsmHook;
 	};
 
 	// Get the destination address of a branch instruction (jmp, call, etc.) at the given address.
@@ -2139,6 +2140,7 @@ namespace SafeHook
 	// This would cleanup every hook that was created, thus forceful shutting down is easier
 	inline void CleanupHooks()
 	{
+		scoped_slim_lock scopedLock(&g_slimLock);
 		while (g_trackHooks)
 		{
 			cTrackHook* pNext = g_trackHooks->m_next;
@@ -2293,7 +2295,7 @@ namespace SafeHook
 					m_originalBytes.restore(false); // Must ensure that address is valid
 					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
 
-					// Redirection is not required when disabling the hook
+					RedirectThreads(threadIds, m_trampoline, m_trampolineSize, m_target);
 
 					ResumeThreads(threadIds);
 				});
@@ -2776,6 +2778,7 @@ namespace SafeHook
 	private:
 		MidAsmHookUnsafe unsafe_hook;
 		unsigned char* trampoline = nullptr;
+		scoped_backup original_bytes;
 
 		// Try to find a place to inject the trampoline
 		// You cannot just put a trampoline in the middle of instruction and expect it to work
@@ -2820,7 +2823,7 @@ namespace SafeHook
 				break;
 			}
 
-			MakeNOP(trampoline, jmpSize);
+			MakeNOP(trampoline, jmpSize, false);
 
 			orig_size = CreateTrampoline((unsigned char*)_address, this->trampoline + jmpSize, nullptr);
 		}
@@ -2855,6 +2858,7 @@ namespace SafeHook
 
 				{
 					scoped_unprotect unprotect(_address.get(), orig_size);
+					original_bytes.store(_address.get(), orig_size);
 
 					memset((void*)_address.get(), 0x90, orig_size);
 				}
@@ -2877,6 +2881,24 @@ namespace SafeHook
 
 		~MidAsmHook()
 		{
+			Sync([&]()
+			{
+				Vector<DWORD> threadIds;
+				EnumerateThreads(threadIds);
+
+				SuspendThreads(threadIds);
+
+				if (unsafe_hook.hook_bytes)
+				{
+					original_bytes.restore(true);
+					FlushInstructionCache(GetCurrentProcess(), (void*)unsafe_hook.cave_address.get(), original_bytes.size);
+				}
+
+				RedirectThreads(threadIds, unsafe_hook.cave_address.get(), original_bytes.size, original_bytes.address);
+
+				ResumeThreads(threadIds);
+			});
+
 			g_pageController.release(unsafe_hook.hook_bytes);
 			unsafe_hook.hook_bytes = nullptr; // Do not restore bytes for a wrapper
 
