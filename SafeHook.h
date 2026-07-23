@@ -2091,6 +2091,63 @@ namespace SafeHook
 		return readOffs;
 	}
 
+	class cTrackHook
+	{
+	protected:
+		void *m_hook;
+		cTrackHook *m_next;
+	public:
+		cTrackHook(void *hook, cTrackHook *next) : m_hook(hook), m_next(next) {}
+
+		virtual ~cTrackHook() {}
+
+		friend void CleanupHooks();
+	};
+
+	class cTrackHookHook : public cTrackHook
+	{
+	public:
+		cTrackHookHook(class Hook* hook, cTrackHook* next) : cTrackHook(hook, next) {}
+
+		virtual ~cTrackHookHook()
+		{
+			if (m_hook)
+			{
+				Hook* hook = (Hook*)m_hook;
+				if (hook->valid())
+					hook->Disable();
+			}
+		}
+	};
+
+	class cTrackHookMidAsmHook : public cTrackHook
+	{
+	public:
+		cTrackHookMidAsmHook(class MidAsmHook* hook, cTrackHook* next) : cTrackHook(hook, next) {}
+
+		virtual ~cTrackHookMidAsmHook()
+		{
+			if (m_hook)
+			{
+				MidAsmHook* hook = (MidAsmHook*)m_hook;
+				hook->~MidAsmHook();
+			}
+		}
+	};
+
+	inline cTrackHook* g_trackHooks = nullptr;
+
+	// This would cleanup every hook that was created, thus forceful shutting down is easier
+	void CleanupHooks()
+	{
+		while (g_trackHooks)
+		{
+			cTrackHook* pNext = g_trackHooks->m_next;
+			delete g_trackHooks;
+			g_trackHooks = pNext;
+		}
+	}
+
 	class Hook
 	{
 		uint8_t* m_target;
@@ -2168,6 +2225,8 @@ namespace SafeHook
 
 				if (bEnable)
 					Enable();
+
+				g_trackHooks = new cTrackHookHook(this, g_trackHooks);
 			}
 			SAFEHOOK_CATCH(e);
 		}
@@ -2186,6 +2245,8 @@ namespace SafeHook
 					*pOriginal = m_trampoline;
 
 				Enable();
+
+				g_trackHooks = new cTrackHookHook(this, g_trackHooks);
 			}
 			SAFEHOOK_CATCH(e);
 		}
@@ -2801,6 +2862,8 @@ namespace SafeHook
 
 				ResumeThreads(threadIds);
 			});
+
+			g_trackHooks = new cTrackHookMidAsmHook(this, g_trackHooks);
 
 			// basically
 			// call hook_wrapper
