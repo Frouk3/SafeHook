@@ -81,10 +81,3 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-Files that contain HDE code
-- hde/hde32.c  (or equivalent hde32 sources)
-- hde/hde64.c  (or equivalent hde64 sources)
-
-If you would prefer a different license (Apache-2.0, GPLv3, LGPL, etc.), I can replace the top section accordingly and add the appropriate notices (such as the Apache NOTICE file). I can also add SPDX headers to the source files on request.
