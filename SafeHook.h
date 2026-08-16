@@ -1802,13 +1802,14 @@ namespace SafeHook
 			case sizeof(uint64_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 14);
+					x.protect(src.get(), 16);
 
-				WriteMemory<uint8_t>(src, 0xFF, false);
-				WriteMemory<uint8_t>(src + 1, 0x15, false);
-				WriteMemory<uint32_t>(src + 2, 0, false); // CALL [RIP+0]
+				WriteMemory<uint16_t>(src + 1, 0x15FF, false); // call qword ptr 
+				WriteMemory<uint32_t>(src + 2, 2, false); // [rip+2]
 
-				WriteMemory<uint64_t>(src + 6, dst.get(), false);
+				WriteMemory<uint16_t>(src + 6, 0x08EB, false); // in case we return after our call we skip the 8 bytes of the pointer -> jmp +8
+
+				WriteMemory<uint64_t>(src + 8, dst.get(), false);
 
 				break;
 			}
