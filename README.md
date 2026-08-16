@@ -1,6 +1,5 @@
 # SafeHook
 Contains basic hooking framework
 
-Uses HDE for hooking<br>
-Full support for x86<br>
-Technical and untested support for x64<br>
+Uses HDE(Hacker Disassembler Engine) for disassembling opcodes<br>
+x86 is supported, while theoretical support for x64 is provided<br>
