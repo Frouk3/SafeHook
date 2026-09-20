@@ -521,7 +521,7 @@ namespace SafeHook
 		T *m_end = nullptr;	 // allocated end
 		T *m_last = nullptr; // last element
 
-		using isPtr = std::is_pointer<T>::value;
+		using isPtr = std::is_pointer<T>::value_type;
 
 		// Allocates memory for the vector
 		// Will potentially grow exponentially if newCapacity is 0
