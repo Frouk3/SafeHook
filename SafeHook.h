@@ -2062,7 +2062,7 @@ namespace SafeHook
 			{
 				size_t sz = HdeCheckOffsetFor(&disasm);
 				size += sz;
-				disasm.len = sz;
+				disasm.len = (uint8_t)sz;
 			}
 			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05)
 			{
