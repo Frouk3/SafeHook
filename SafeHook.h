@@ -1349,7 +1349,6 @@ namespace SafeHook
 
 			void *alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 			{
-				scoped_slim_lock lock(&g_slimLock); // prevent multiple threads from allocating at the same time, which could lead to memory corruption
 				for (Page &page : m_pages)
 				{
 					void *ptr = page.alloc(size, alignment);
@@ -1373,8 +1372,6 @@ namespace SafeHook
 
 			void free(void *ptr)
 			{
-				scoped_slim_lock lock(&g_slimLock); // prevent multiple threads from freeing at the same time, which could lead to memory corruption
-
 				if (!ptr)
 					return;
 
@@ -1427,7 +1424,6 @@ namespace SafeHook
 					return ptr;
 			}
 
-			scoped_slim_lock lock(&g_slimLock); // couldn't allocate already or no regions exist
 			AllocationRegion *pRegion = new AllocationRegion();
 			if (!pRegion->init(VIRTUAL_PAGE_SIZE))
 			{
@@ -1470,7 +1466,6 @@ namespace SafeHook
 
 		void release(void *ptr)
 		{
-			scoped_slim_lock lock(&g_slimLock);
 			if (!ptr)
 				return;
 
