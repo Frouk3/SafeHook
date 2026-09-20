@@ -1,53 +1,53 @@
 #pragma once
 
 #if defined(_MSC_VER)
-	#include <Windows.h>
+#include <Windows.h>
 #elif defined(__MINGW32__)
-	#include <windows.h>
+#include <windows.h>
 #else
-	#error "No support for this one. Targetting Windows only."
+#error "No support for this one. Targetting Windows only."
 #endif
 
 // Controls exception handling.
 // If you disable exceptions, then you're on your own, and expect the code to crash
 #if !defined(SAFEHOOK_NO_EXCEPTIONS)
-	#define SAFEHOOK_NO_EXCEPTIONS 0
+#define SAFEHOOK_NO_EXCEPTIONS 0
 #endif
 
 #if !defined(SAFEHOOK_TEST)
-	#define SAFEHOOK_TEST 0
+#define SAFEHOOK_TEST 0
 #endif
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
-	#define SAFEHOOK_X64 1
-	#define SAFEHOOK_X86 0
-	#define SAFEHOOK_BY_ARCH(x86, x64) x64
+#define SAFEHOOK_X64 1
+#define SAFEHOOK_X86 0
+#define SAFEHOOK_BY_ARCH(x86, x64) x64
 #else
-	#define SAFEHOOK_X86 1
-	#define SAFEHOOK_X64 0
-	#define SAFEHOOK_BY_ARCH(x86, x64) x86
+#define SAFEHOOK_X86 1
+#define SAFEHOOK_X64 0
+#define SAFEHOOK_BY_ARCH(x86, x64) x86
 #endif
 
 #if defined(_MSC_VER)
-	#define SAFEHOOK_FORCEINLINE __forceinline
+#define SAFEHOOK_FORCEINLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
-	#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
+#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
 #else
-	#define SAFEHOOK_FORCEINLINE inline
+#define SAFEHOOK_FORCEINLINE inline
 #endif
 
 #if defined(_MSC_VER)
-	#define ALIGNAS(x) __declspec(align(x))
+#define ALIGNAS(x) __declspec(align(x))
 #elif defined(__GNUC__) || defined(__clang__)
-	#define ALIGNAS(x) __attribute__((aligned(x)))
+#define ALIGNAS(x) __attribute__((aligned(x)))
 #else
-	#define ALIGNAS(x)
+#define ALIGNAS(x)
 #endif
 
 #if SAFEHOOK_X64
-	#include "hde/hde64.h"
+#include "hde/hde64.h"
 #else
-	#include "hde/hde32.h"
+#include "hde/hde32.h"
 #endif
 
 #include <assert.h>
@@ -59,14 +59,16 @@
 #include <TlHelp32.h>
 #include <initializer_list>
 
+#pragma warning(error : 4996) // 'function': was declared deprecated
+
 // All credits for function hooks goes to DarkByte
 
 #if SAFEHOOK_X64
-	typedef hde64s hde_s;
-	#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
+typedef hde64s hde_s;
+#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
 #else
-	typedef hde32s hde_s;
-	#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
+typedef hde32s hde_s;
+#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
 #endif
 
 namespace SafeHook
@@ -156,29 +158,29 @@ namespace SafeHook
 	{
 	public:
 		Exception() = default;
-		Exception(const char *msg, const char *file, unsigned int line) {};
-		Exception(const Exception &) = default;
-		Exception(Exception &&) noexcept = default;
+		Exception(const char* msg, const char* file, unsigned int line) {};
+		Exception(const Exception&) = default;
+		Exception(Exception&&) noexcept = default;
 
 		~Exception() = default;
 
-		Exception &operator=(const Exception &other) = default;
-		Exception &operator=(Exception &&other) noexcept = default;
+		Exception& operator=(const Exception& other) = default;
+		Exception& operator=(Exception&& other) noexcept = default;
 
-		const char *what() const { return ""; }
+		const char* what() const { return ""; }
 		int line() const { return -1; }
-		const char *file() const { return ""; }
+		const char* file() const { return ""; }
 
-		void DoFormat(const char *fmt, ...) {}
+		void DoFormat(const char* fmt, ...) {}
 	};
 #else
 	class Exception
 	{
-		char *m_msg;
-		const char *m_file;
+		char* m_msg;
+		const char* m_file;
 		unsigned int m_line;
 
-		void AllocateString(const char *msg)
+		void AllocateString(const char* msg)
 		{
 			size_t len = strlen(msg) + 1;
 			m_msg = new char[len];
@@ -194,27 +196,27 @@ namespace SafeHook
 			}
 		}
 
-		void CopyFrom(const Exception &other)
+		void CopyFrom(const Exception& other)
 		{
 			m_line = other.m_line;
 			AllocateString(other.m_msg);
 		}
 
-		void MoveFrom(Exception &&other) noexcept
+		void MoveFrom(Exception&& other) noexcept
 		{
 			m_line = other.m_line;
 			m_msg = other.m_msg;
 			other.m_msg = nullptr;
 		}
 
-		void MoveFrom(Exception &other) noexcept
+		void MoveFrom(Exception& other) noexcept
 		{
 			m_line = other.m_line;
 			m_msg = other.m_msg;
 			other.m_msg = nullptr;
 		}
 
-		void FormatMsg(const char *fmt, va_list va)
+		void FormatMsg(const char* fmt, va_list va)
 		{
 			int length = _vscprintf(fmt, va) + 1;
 			m_msg = new char[length];
@@ -223,18 +225,18 @@ namespace SafeHook
 		}
 
 	public:
-		Exception(const char *msg, const char *file, unsigned int line) : m_line(line), m_file(file)
+		Exception(const char* msg, const char* file, unsigned int line) : m_line(line), m_file(file)
 		{
 			if (msg)
 				AllocateString(msg);
 		}
 
-		Exception(const Exception &other)
+		Exception(const Exception& other)
 		{
 			CopyFrom(other);
 		}
 
-		Exception(Exception &&other) noexcept
+		Exception(Exception&& other) noexcept
 		{
 			MoveFrom(std::move(other));
 		}
@@ -244,7 +246,7 @@ namespace SafeHook
 			FreeString();
 		}
 
-		Exception &operator=(const Exception &other)
+		Exception& operator=(const Exception& other)
 		{
 			if (this != &other)
 			{
@@ -254,7 +256,7 @@ namespace SafeHook
 			return *this;
 		}
 
-		Exception &operator=(Exception &&other) noexcept
+		Exception& operator=(Exception&& other) noexcept
 		{
 			if (this != &other)
 			{
@@ -264,13 +266,13 @@ namespace SafeHook
 			return *this;
 		}
 
-		const char *what() const { return m_msg; }
+		const char* what() const { return m_msg; }
 		int line() const { return m_line; }
-		const char *file() const { return m_file; }
+		const char* file() const { return m_file; }
 
 		static inline char ExceptionBuffer[512];
 
-		void DoFormat(const char *format, ...)
+		void DoFormat(const char* format, ...)
 		{
 			va_list va;
 			va_start(va, format);
@@ -283,10 +285,10 @@ namespace SafeHook
 #endif
 
 #if SAFEHOOK_NO_EXCEPTIONS
-	inline void ReportException(const Exception &e) {}
-	inline void SilentReport(const char *fmt, ...) {}
+	inline void ReportException(const Exception& e) {}
+	inline void SilentReport(const char* fmt, ...) {}
 #else
-	inline void ReportException(const Exception &e)
+	inline void ReportException(const Exception& e)
 	{
 		Exception::ExceptionBuffer[0] = 0;
 		sprintf_s(Exception::ExceptionBuffer, "SafeHook Exception in %s: %s (line %d)\n", e.file(), e.what(), e.line());
@@ -295,7 +297,7 @@ namespace SafeHook
 		OutputDebugStringA(Exception::ExceptionBuffer);
 	}
 
-	inline void SilentReport(const char *fmt, ...)
+	inline void SilentReport(const char* fmt, ...)
 	{
 		va_list va;
 		va_start(va, fmt);
@@ -311,32 +313,32 @@ namespace SafeHook
 #endif
 
 #if SAFEHOOK_NO_EXCEPTIONS
-	#define SAFEHOOK_THROW(msg) \
+#define SAFEHOOK_THROW(msg) \
 		do                      \
 		{                       \
 			std::abort();       \
 		} while (0)
-	#define SAFEHOOK_THROW_FORMAT(msg, ...) \
+#define SAFEHOOK_THROW_FORMAT(msg, ...) \
 		do                                  \
 		{                                   \
 			std::abort();                   \
 		} while (0)
-	#define SAFEHOOK_REPORT_HERE(msg, ...) \
+#define SAFEHOOK_REPORT_HERE(msg, ...) \
 		do                                 \
 		{                                  \
 			std::abort();                  \
 		} while (0)
-	#define SAFEHOOK_CATCH(e) \
+#define SAFEHOOK_CATCH(e) \
 		catch (const SafeHook::Exception &e) { std::abort(); }
-	#define SAFEHOOK_CATCH_RET(e)            \
+#define SAFEHOOK_CATCH_RET(e)            \
 		catch (const SafeHook::Exception &e) \
 		{                                    \
 			std::abort();                    \
 			return;                          \
 		}
 #else
-	#define SAFEHOOK_THROW(msg) throw SafeHook::Exception(msg, __FILE__, __LINE__)
-	#define SAFEHOOK_THROW_FORMAT(msg, ...)                          \
+#define SAFEHOOK_THROW(msg) throw SafeHook::Exception(msg, __FILE__, __LINE__)
+#define SAFEHOOK_THROW_FORMAT(msg, ...)                          \
 		do                                                           \
 		{                                                            \
 			SafeHook::Exception except(nullptr, __FILE__, __LINE__); \
@@ -344,10 +346,10 @@ namespace SafeHook
 			throw except;                                            \
 		} while (0)
 	// Also reports function where the exception was thrown, and the line number
-	#define SAFEHOOK_REPORT_HERE(msg, ...) SAFEHOOK_THROW_FORMAT(__FUNCTION__##": "##msg, __VA_ARGS__)
-	#define SAFEHOOK_CATCH(e) \
+#define SAFEHOOK_REPORT_HERE(msg, ...) SAFEHOOK_THROW_FORMAT(__FUNCTION__##": "##msg, __VA_ARGS__)
+#define SAFEHOOK_CATCH(e) \
 		catch (const SafeHook::Exception &e) { SafeHook::ReportException(e); }
-	#define SAFEHOOK_CATCH_RET(e)            \
+#define SAFEHOOK_CATCH_RET(e)            \
 		catch (const SafeHook::Exception &e) \
 		{                                    \
 			SafeHook::ReportException(e);    \
@@ -401,60 +403,60 @@ namespace SafeHook
 	public:
 		constexpr SafeAddress() : m_address(0) {}
 		constexpr SafeAddress(uintptr_t address) : m_address(address) {}
-		constexpr SafeAddress(const void *address) : m_address((uintptr_t)address) {}
+		constexpr SafeAddress(const void* address) : m_address((uintptr_t)address) {}
 
 		const uintptr_t get() const { return m_address; }
 		void add(size_t offset) { m_address += offset; }
 
 		void set(uintptr_t address) { m_address = address; }
-		void set(const void *address) { m_address = (uintptr_t)address; }
+		void set(const void* address) { m_address = (uintptr_t)address; }
 
 		uintptr_t operator+(size_t offset) const { return m_address + offset; }
 		uintptr_t operator-(size_t offset) const { return m_address - offset; }
-		uintptr_t operator-(const SafeAddress &other) const { return m_address - other.m_address; }
-		uintptr_t operator+(const SafeAddress &other) const { return m_address + other.m_address; }
+		uintptr_t operator-(const SafeAddress& other) const { return m_address - other.m_address; }
+		uintptr_t operator+(const SafeAddress& other) const { return m_address + other.m_address; }
 
-		SafeAddress &operator+=(size_t offset)
+		SafeAddress& operator+=(size_t offset)
 		{
 			m_address += offset;
 			return *this;
 		}
-		SafeAddress &operator-=(size_t offset)
+		SafeAddress& operator-=(size_t offset)
 		{
 			m_address -= offset;
 			return *this;
 		}
-		SafeAddress &operator+=(const SafeAddress &other)
+		SafeAddress& operator+=(const SafeAddress& other)
 		{
 			m_address += other.m_address;
 			return *this;
 		}
-		SafeAddress &operator-=(const SafeAddress &other)
+		SafeAddress& operator-=(const SafeAddress& other)
 		{
 			m_address -= other.m_address;
 			return *this;
 		}
 
-		SafeAddress &operator=(const uintptr_t &address)
+		SafeAddress& operator=(const uintptr_t& address)
 		{
 			m_address = address;
 			return *this;
 		}
-		SafeAddress &operator=(const void *address)
+		SafeAddress& operator=(const void* address)
 		{
 			m_address = (uintptr_t)address;
 			return *this;
 		}
-		SafeAddress &operator=(const SafeAddress &other)
+		SafeAddress& operator=(const SafeAddress& other)
 		{
 			m_address = other.m_address;
 			return *this;
 		}
 
-		bool operator==(const SafeAddress &other) const { return m_address == other.m_address; }
-		bool operator!=(const SafeAddress &other) const { return m_address != other.m_address; }
+		bool operator==(const SafeAddress& other) const { return m_address == other.m_address; }
+		bool operator!=(const SafeAddress& other) const { return m_address != other.m_address; }
 
-		bool DistRangeOf(const SafeAddress &to, size_t range) const
+		bool DistRangeOf(const SafeAddress& to, size_t range) const
 		{
 			uintptr_t distance = m_address > to.m_address ? m_address - to.m_address : to.m_address - m_address;
 
@@ -517,9 +519,9 @@ namespace SafeHook
 	template <typename T>
 	class Vector
 	{
-		T *m_data = nullptr; // first element
-		T *m_end = nullptr;	 // allocated end
-		T *m_last = nullptr; // last element
+		T* m_data = nullptr; // first element
+		T* m_end = nullptr;	 // allocated end
+		T* m_last = nullptr; // last element
 
 		using isPtr = std::is_pointer<T>::value_type;
 
@@ -530,7 +532,7 @@ namespace SafeHook
 			if (!capacity() && !newCapacity)
 				newCapacity = 4; // default capacity
 
-			T *oldData = m_data;
+			T* oldData = m_data;
 			if (!newCapacity)
 				newCapacity = capacity() * 2; // doing x^2 growth isn't the best idea, x*2 is better for RAM usage
 
@@ -558,34 +560,34 @@ namespace SafeHook
 			}
 		}
 
-		void DestructElems(T *begin, T *end)
+		void DestructElems(T* begin, T* end)
 		{
 			if (!isPtr())
 			{
-				for (T *it = begin; it != end; ++it)
+				for (T* it = begin; it != end; ++it)
 					it->~T();
 			}
 		}
 
-		void ConstructElems(T *begin, T *end)
+		void ConstructElems(T* begin, T* end)
 		{
 			if (!isPtr())
 			{
-				for (T *it = begin; it != end; ++it)
+				for (T* it = begin; it != end; ++it)
 					new (it) T();
 			}
 		}
 
-		void ConstructElems(T *begin, T *end, const T &value)
+		void ConstructElems(T* begin, T* end, const T& value)
 		{
 			if (!isPtr())
 			{
-				for (T *it = begin; it != end; ++it)
+				for (T* it = begin; it != end; ++it)
 					new (it) T(value);
 			}
 		}
 
-		void CopyElems(T *dest, const T *src, size_t count)
+		void CopyElems(T* dest, const T* src, size_t count)
 		{
 			if (!isPtr())
 			{
@@ -598,7 +600,7 @@ namespace SafeHook
 			}
 		}
 
-		void MoveElems(T *dest, const T *src, size_t count)
+		void MoveElems(T* dest, const T* src, size_t count)
 		{
 			if (!isPtr())
 			{
@@ -618,14 +620,14 @@ namespace SafeHook
 			reallocate(capacity);
 		}
 
-		Vector(const Vector &other) : m_data(nullptr), m_end(nullptr), m_last(nullptr)
+		Vector(const Vector& other) : m_data(nullptr), m_end(nullptr), m_last(nullptr)
 		{
 			reallocate(other.capacity());
 			CopyElems(m_data, other.m_data, other.size());
 			m_last = m_data + other.size();
 		}
 
-		Vector(Vector &&other) noexcept : m_data(other.m_data), m_end(other.m_end), m_last(other.m_last)
+		Vector(Vector&& other) noexcept : m_data(other.m_data), m_end(other.m_end), m_last(other.m_last)
 		{
 			other.m_data = nullptr;
 			other.m_end = nullptr;
@@ -645,7 +647,7 @@ namespace SafeHook
 			destroy();
 		}
 
-		Vector &operator=(const Vector &other)
+		Vector& operator=(const Vector& other)
 		{
 			if (this != &other)
 			{
@@ -657,7 +659,7 @@ namespace SafeHook
 			return *this;
 		}
 
-		Vector &operator=(Vector &&other) noexcept
+		Vector& operator=(Vector&& other) noexcept
 		{
 			if (this != &other)
 			{
@@ -673,7 +675,7 @@ namespace SafeHook
 			return *this;
 		}
 
-		Vector &operator=(std::initializer_list<T> list)
+		Vector& operator=(std::initializer_list<T> list)
 		{
 			destroy();
 			reallocate(list.size());
@@ -711,7 +713,7 @@ namespace SafeHook
 			m_last = m_data + newSize;
 		}
 
-		void push_back(const T &value)
+		void push_back(const T& value)
 		{
 			if (size() >= capacity())
 				reallocate();
@@ -720,7 +722,7 @@ namespace SafeHook
 			++m_last;
 		}
 
-		void push_back(T &&value)
+		void push_back(T&& value)
 		{
 			if (size() >= capacity())
 				reallocate();
@@ -739,7 +741,7 @@ namespace SafeHook
 			}
 		}
 
-		void insert(size_t index, const T &value)
+		void insert(size_t index, const T& value)
 		{
 			if (index > size())
 				return;
@@ -752,7 +754,7 @@ namespace SafeHook
 			++m_last;
 		}
 
-		void insert(size_t index, T &&value)
+		void insert(size_t index, T&& value)
 		{
 			if (index > size())
 				return;
@@ -765,19 +767,19 @@ namespace SafeHook
 			++m_last;
 		}
 
-		void fill(const T &value)
+		void fill(const T& value)
 		{
-			for (T *it = m_data; it != m_last; ++it)
+			for (T* it = m_data; it != m_last; ++it)
 				*it = value;
 		}
 
-		void fill(T &&value)
+		void fill(T&& value)
 		{
-			for (T *it = m_data; it != m_last; ++it)
+			for (T* it = m_data; it != m_last; ++it)
 				*it = std::move(value);
 		}
 
-		void fill(const T &value, size_t count)
+		void fill(const T& value, size_t count)
 		{
 			if (count > capacity())
 				reallocate(count);
@@ -788,9 +790,9 @@ namespace SafeHook
 			m_last = m_data + count;
 		}
 
-		T *find(const T &value)
+		T* find(const T& value)
 		{
-			for (T *it = m_data; it != m_last; ++it)
+			for (T* it = m_data; it != m_last; ++it)
 			{
 				if (*it == value)
 					return it;
@@ -799,9 +801,9 @@ namespace SafeHook
 		}
 
 		template <typename Func>
-		T *find_if(Func predicate)
+		T* find_if(Func predicate)
 		{
-			for (T *it = m_data; it != m_last; ++it)
+			for (T* it = m_data; it != m_last; ++it)
 			{
 				if (predicate(*it))
 					return it;
@@ -812,9 +814,9 @@ namespace SafeHook
 		template <typename Func>
 		void sort_by(Func comparator)
 		{
-			for (T *i = m_data; i != m_last; ++i)
+			for (T* i = m_data; i != m_last; ++i)
 			{
-				for (T *j = i + 1; j != m_last; ++j)
+				for (T* j = i + 1; j != m_last; ++j)
 				{
 					if (comparator(*j, *i))
 					{
@@ -827,7 +829,7 @@ namespace SafeHook
 		template <typename Func>
 		void for_each(Func func)
 		{
-			for (T *it = m_data; it != m_last; ++it)
+			for (T* it = m_data; it != m_last; ++it)
 			{
 				func(*it);
 			}
@@ -844,7 +846,7 @@ namespace SafeHook
 			--m_last;
 		}
 
-		void erase(T *element)
+		void erase(T* element)
 		{
 			if (element < m_data || element >= m_last)
 				return;
@@ -853,17 +855,17 @@ namespace SafeHook
 			erase(index);
 		}
 
-		T *begin() { return m_data; }
-		const T *begin() const { return m_data; }
+		T* begin() { return m_data; }
+		const T* begin() const { return m_data; }
 
-		T *end() { return m_last; }
-		const T *end() const { return m_last; }
+		T* end() { return m_last; }
+		const T* end() const { return m_last; }
 
-		T &operator[](size_t index) { return m_data[index]; }
-		const T &operator[](size_t index) const { return m_data[index]; }
+		T& operator[](size_t index) { return m_data[index]; }
+		const T& operator[](size_t index) const { return m_data[index]; }
 	};
 
-	inline bool EnumerateThreads(Vector<DWORD> &threadIds)
+	inline bool EnumerateThreads(Vector<DWORD>& threadIds)
 	{
 		DWORD curProcessId = GetCurrentProcessId();
 		DWORD curThreadId = GetCurrentThreadId();
@@ -895,7 +897,7 @@ namespace SafeHook
 		return true;
 	}
 
-	inline void SuspendThreads(Vector<DWORD> &threadIds)
+	inline void SuspendThreads(Vector<DWORD>& threadIds)
 	{
 		for (int i = threadIds.size() - 1; i >= 0; --i)
 		{
@@ -918,7 +920,7 @@ namespace SafeHook
 		}
 	}
 
-	inline void ResumeThreads(Vector<DWORD> &threadIds)
+	inline void ResumeThreads(Vector<DWORD>& threadIds)
 	{
 		for (int i = threadIds.size() - 1; i >= 0; --i)
 		{
@@ -932,7 +934,7 @@ namespace SafeHook
 		}
 	}
 
-	inline void RedirectThreads(const Vector<DWORD> &threadIds, SafeAddress target, size_t size, SafeAddress trampoline)
+	inline void RedirectThreads(const Vector<DWORD>& threadIds, SafeAddress target, size_t size, SafeAddress trampoline)
 	{
 		bool doBreak = false;
 		for (int i = threadIds.size() - 1; i >= 0; --i)
@@ -946,9 +948,9 @@ namespace SafeHook
 				if (GetThreadContext(hThread, &ctx))
 				{
 #if SAFEHOOK_X64
-					uintptr_t &ip = ctx.Rip;
+					uintptr_t& ip = ctx.Rip;
 #else
-					DWORD &ip = ctx.Eip;
+					DWORD& ip = ctx.Eip;
 #endif
 					// If a thread is suspended mid-prologue, recalculate its instruction pointer offset inside the trampoline
 					if (ip >= target.get() && ip < (target + size))
@@ -997,9 +999,9 @@ namespace SafeHook
 						if (GetThreadContext(hThread, &ctx))
 						{
 #if SAFEHOOK_X64
-							uintptr_t &ip = ctx.Rip;
+							uintptr_t& ip = ctx.Rip;
 #else
-							DWORD &ip = ctx.Eip;
+							DWORD& ip = ctx.Eip;
 #endif
 							// If a thread is suspended mid-prologue, recalculate its instruction pointer offset inside the trampoline
 							if (ip >= target.get() && ip < (target + size))
@@ -1041,15 +1043,15 @@ namespace SafeHook
 		protected:
 			struct Block
 			{
-				void *m_baseptr;
+				void* m_baseptr;
 				size_t m_size;
 				size_t m_alignment;
 
-				Block *m_pNext, *m_pPrev;
+				Block* m_pNext, * m_pPrev;
 
-				Block(void *baseptr, size_t size, size_t alignment) : m_baseptr(baseptr), m_size(size), m_alignment(alignment), m_pNext(nullptr), m_pPrev(nullptr) {}
+				Block(void* baseptr, size_t size, size_t alignment) : m_baseptr(baseptr), m_size(size), m_alignment(alignment), m_pNext(nullptr), m_pPrev(nullptr) {}
 
-				void chain(Block *pNext, Block *pPrev)
+				void chain(Block* pNext, Block* pPrev)
 				{
 					m_pNext = pNext;
 					m_pPrev = pPrev;
@@ -1074,7 +1076,7 @@ namespace SafeHook
 				}
 			};
 
-			void chainBlock(Block *pBlock)
+			void chainBlock(Block* pBlock)
 			{
 				if (!m_pFirstBlock)
 				{
@@ -1092,7 +1094,7 @@ namespace SafeHook
 				}
 			}
 
-			void unchainBlock(Block *pBlock)
+			void unchainBlock(Block* pBlock)
 			{
 				if (pBlock == m_pFirstBlock)
 					m_pFirstBlock = pBlock->m_pNext;
@@ -1103,20 +1105,20 @@ namespace SafeHook
 				pBlock->unchain();
 			}
 
-			void *m_base;
-			void *m_nextFree;
-			void *m_end;
+			void* m_base;
+			void* m_nextFree;
+			void* m_end;
 
-			Block *m_pFirstBlock, *m_pLastBlock;
+			Block* m_pFirstBlock, * m_pLastBlock;
 
 		public:
 			Page() : m_base(nullptr), m_nextFree(nullptr), m_end(nullptr), m_pFirstBlock(nullptr), m_pLastBlock(nullptr) {}
-			Page(void *base, size_t size)
+			Page(void* base, size_t size)
 			{
 				init(base, size);
 			}
 
-			Page(const Page &other) noexcept
+			Page(const Page& other) noexcept
 			{
 				m_base = other.m_base;
 				m_nextFree = other.m_nextFree;
@@ -1125,7 +1127,7 @@ namespace SafeHook
 				m_pLastBlock = other.m_pLastBlock;
 			}
 
-			Page(Page &&other)
+			Page(Page&& other)
 			{
 				if (this != &other)
 				{
@@ -1143,7 +1145,7 @@ namespace SafeHook
 				}
 			}
 
-			Page &operator=(const Page &other) noexcept
+			Page& operator=(const Page& other) noexcept
 			{
 				m_base = other.m_base;
 				m_nextFree = other.m_nextFree;
@@ -1154,7 +1156,7 @@ namespace SafeHook
 				return *this;
 			}
 
-			Page &operator=(Page &&other)
+			Page& operator=(Page&& other)
 			{
 				if (this != &other)
 				{
@@ -1174,22 +1176,22 @@ namespace SafeHook
 			}
 
 			size_t size() const { return (uintptr_t)m_end - (uintptr_t)m_base; }
-			Block *firstBlock() const { return m_pFirstBlock; }
-			Block *lastBlock() const { return m_pLastBlock; }
+			Block* firstBlock() const { return m_pFirstBlock; }
+			Block* lastBlock() const { return m_pLastBlock; }
 
-			void init(void *base, size_t size)
+			void init(void* base, size_t size)
 			{
 				m_base = m_nextFree = base;
-				m_end = (void *)((uintptr_t)base + size);
+				m_end = (void*)((uintptr_t)base + size);
 
 				m_pFirstBlock = m_pLastBlock = nullptr;
 			}
 
 			void deinit()
 			{
-				for (Block *pBlock = m_pFirstBlock; pBlock;)
+				for (Block* pBlock = m_pFirstBlock; pBlock;)
 				{
-					Block *pNext = pBlock->m_pNext;
+					Block* pNext = pBlock->m_pNext;
 
 					delete pBlock;
 					pBlock = pNext;
@@ -1199,9 +1201,9 @@ namespace SafeHook
 				m_base = m_nextFree = m_end = nullptr;
 			}
 
-			void *getNextFree() const { return m_nextFree; }
+			void* getNextFree() const { return m_nextFree; }
 
-			void *alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+			void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 			{
 				if (!m_base)
 					SAFEHOOK_REPORT_HERE("Page is not initialized!");
@@ -1210,15 +1212,15 @@ namespace SafeHook
 				if (align(current + size, alignment) > (uintptr_t)m_end) // out of memory
 					return nullptr;
 
-				m_nextFree = (void *)align(current + size, alignment);
+				m_nextFree = (void*)align(current + size, alignment);
 
-				Block *pBlock = new Block((void *)current, size, alignment);
+				Block* pBlock = new Block((void*)current, size, alignment);
 				chainBlock(pBlock);
 
 				return pBlock->m_baseptr;
 			}
 
-			void free(void *ptr)
+			void free(void* ptr)
 			{
 				if (!ptr)
 					return;
@@ -1232,7 +1234,7 @@ namespace SafeHook
 					return;
 				}
 
-				for (Block *pBlock = m_pFirstBlock; pBlock; pBlock = pBlock->m_pNext)
+				for (Block* pBlock = m_pFirstBlock; pBlock; pBlock = pBlock->m_pNext)
 				{
 					if (pBlock->m_baseptr == ptr)
 					{
@@ -1253,7 +1255,7 @@ namespace SafeHook
 		class AllocationRegion
 		{
 		protected:
-			void *m_baseAddress;
+			void* m_baseAddress;
 			size_t m_size;
 
 			LONG m_allocRefCount;
@@ -1283,7 +1285,7 @@ namespace SafeHook
 				for (size_t i = 0; i < size / PAGE_SIZE; ++i)
 				{
 					Page page;
-					page.init((void *)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+					page.init((void*)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
 
 					m_pages.push_back(std::move(page));
 				}
@@ -1301,7 +1303,7 @@ namespace SafeHook
 				// while (range(from, base) <= 0x7FFF0000) { ...; base += mbi.RegionSize; }
 				for (SafeAddress base = from; from.DistRangeOf(base, 0x7FFF0000);)
 				{
-					MEMORY_BASIC_INFORMATION mbi{0};
+					MEMORY_BASIC_INFORMATION mbi{ 0 };
 					if (!VirtualQuery((LPCVOID)base.get(), &mbi, sizeof(mbi)))
 						return false;
 
@@ -1318,7 +1320,7 @@ namespace SafeHook
 						for (size_t i = 0; i < size / PAGE_SIZE; ++i)
 						{
 							Page page;
-							page.init((void *)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+							page.init((void*)align((uintptr_t)m_baseAddress + i * PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
 
 							m_pages.push_back(std::move(page));
 						}
@@ -1335,7 +1337,7 @@ namespace SafeHook
 
 			void deinit()
 			{
-				for (Page &page : m_pages)
+				for (Page& page : m_pages)
 					page.deinit();
 
 				m_pages.clear();
@@ -1347,11 +1349,11 @@ namespace SafeHook
 				m_size = 0;
 			}
 
-			void *alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+			void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 			{
-				for (Page &page : m_pages)
+				for (Page& page : m_pages)
 				{
-					void *ptr = page.alloc(size, alignment);
+					void* ptr = page.alloc(size, alignment);
 					if (ptr)
 					{
 						m_allocRefCount++;
@@ -1370,12 +1372,12 @@ namespace SafeHook
 			}
 #endif
 
-			void free(void *ptr)
+			void free(void* ptr)
 			{
 				if (!ptr)
 					return;
 
-				for (Page &page : m_pages)
+				for (Page& page : m_pages)
 				{
 					if (ptr >= page.m_base && ptr < page.m_end)
 					{
@@ -1389,22 +1391,22 @@ namespace SafeHook
 			friend class PageController;
 		};
 
-		Vector<AllocationRegion *> m_regions;
+		Vector<AllocationRegion*> m_regions;
 #if SAFEHOOK_X64
-		Vector<AllocationRegion *> m_nearRegions;
+		Vector<AllocationRegion*> m_nearRegions;
 #endif
 	public:
 		PageController() {}
 		~PageController()
 		{
-			for (AllocationRegion *pRegion : m_regions)
+			for (AllocationRegion* pRegion : m_regions)
 			{
 				pRegion->deinit();
 				delete pRegion;
 			}
 
 #if SAFEHOOK_X64
-			for (AllocationRegion *pRegion : m_nearRegions)
+			for (AllocationRegion* pRegion : m_nearRegions)
 			{
 				pRegion->deinit();
 				delete pRegion;
@@ -1412,19 +1414,19 @@ namespace SafeHook
 #endif
 		}
 
-		void *alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+		void* alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 		{
 			if (!size)
 				return nullptr;
 
-			for (AllocationRegion *pRegion : m_regions)
+			for (AllocationRegion* pRegion : m_regions)
 			{
-				void *ptr = pRegion->alloc(size, alignment);
+				void* ptr = pRegion->alloc(size, alignment);
 				if (ptr)
 					return ptr;
 			}
 
-			AllocationRegion *pRegion = new AllocationRegion();
+			AllocationRegion* pRegion = new AllocationRegion();
 			if (!pRegion->init(VIRTUAL_PAGE_SIZE))
 			{
 				delete pRegion;
@@ -1436,22 +1438,22 @@ namespace SafeHook
 			return pRegion->alloc(size, alignment);
 		}
 #if SAFEHOOK_X64
-		void *allocNear(SafeAddress from, size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
+		void* allocNear(SafeAddress from, size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 		{
 			if (!size)
 				return nullptr;
 
-			for (AllocationRegion *pRegion : m_nearRegions)
+			for (AllocationRegion* pRegion : m_nearRegions)
 			{
 				if (pRegion->checkDistance2GB(from))
 				{
-					void *ptr = pRegion->alloc(size, alignment);
+					void* ptr = pRegion->alloc(size, alignment);
 					if (ptr)
 						return ptr;
 				}
 			}
 
-			AllocationRegion *pRegion = new AllocationRegion();
+			AllocationRegion* pRegion = new AllocationRegion();
 			if (!pRegion->initNear(from, VIRTUAL_PAGE_SIZE))
 			{
 				delete pRegion;
@@ -1464,14 +1466,14 @@ namespace SafeHook
 		}
 #endif
 
-		void release(void *ptr)
+		void release(void* ptr)
 		{
 			if (!ptr)
 				return;
 
-			for (AllocationRegion *&pRegion : m_regions)
+			for (AllocationRegion*& pRegion : m_regions)
 			{
-				if (ptr >= pRegion->m_baseAddress && ptr < (void *)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
+				if (ptr >= pRegion->m_baseAddress && ptr < (void*)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
 				{
 					pRegion->free(ptr);
 					if (pRegion->m_allocRefCount == 0)
@@ -1484,9 +1486,9 @@ namespace SafeHook
 				}
 			}
 #if SAFEHOOK_X64 // only x64 has near allocation, not critical to check for x86
-			for (AllocationRegion *&pRegion : m_nearRegions)
+			for (AllocationRegion*& pRegion : m_nearRegions)
 			{
-				if (ptr >= pRegion->m_baseAddress && ptr < (void *)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
+				if (ptr >= pRegion->m_baseAddress && ptr < (void*)((uintptr_t)pRegion->m_baseAddress + pRegion->m_size))
 				{
 					pRegion->free(ptr);
 					if (pRegion->m_allocRefCount == 0)
@@ -1503,9 +1505,9 @@ namespace SafeHook
 
 #if SAFEHOOK_X64
 		// use it to have a region for hooking into specific module
-		AllocationRegion *allocRegionMod(void *base, size_t size)
+		AllocationRegion* allocRegionMod(void* base, size_t size)
 		{
-			AllocationRegion *pRegion = new AllocationRegion();
+			AllocationRegion* pRegion = new AllocationRegion();
 			if (!pRegion->initNear(base, size))
 			{
 				delete pRegion;
@@ -1527,13 +1529,13 @@ namespace SafeHook
 	class PageControllerPageInitModule
 	{
 	public:
-		PageControllerPageInitModule(const char *moduleName)
+		PageControllerPageInitModule(const char* moduleName)
 		{
 			HMODULE hModule = GetModuleHandleA(moduleName);
 			if (!hModule)
 				SAFEHOOK_THROW_FORMAT("Could not get module handle for %s", moduleName);
 
-			MEMORY_BASIC_INFORMATION mbi{0};
+			MEMORY_BASIC_INFORMATION mbi{ 0 };
 			if (!VirtualQuery((LPCVOID)hModule, &mbi, sizeof(mbi)))
 				SAFEHOOK_THROW_FORMAT("Could not query memory information for module %s", moduleName);
 
@@ -1543,7 +1545,7 @@ namespace SafeHook
 			if (mbi.RegionSize < PageController::VIRTUAL_PAGE_SIZE)
 				SAFEHOOK_THROW_FORMAT("Module %s is smaller than the virtual page size!", moduleName);
 
-			g_pageController.allocRegionMod((void *)mbi.BaseAddress, PageController::VIRTUAL_PAGE_SIZE);
+			g_pageController.allocRegionMod((void*)mbi.BaseAddress, PageController::VIRTUAL_PAGE_SIZE);
 		}
 	};
 #endif
@@ -1627,27 +1629,27 @@ namespace SafeHook
 		{
 			scoped_unprotect unprotect(address.get(), size);
 
-			memset((void *)address.get(), value, size);
+			memset((void*)address.get(), value, size);
 		}
 		else
 		{
-			memset((void *)address.get(), value, size);
+			memset((void*)address.get(), value, size);
 		}
 	}
 
 	// Writes an object of type T to the specified address. If vp is true, it temporarily unprotects the memory region to allow writing.
 	template <typename T>
-	SAFEHOOK_FORCEINLINE void WriteObject(SafeAddress address, const T &object, bool vp = true)
+	SAFEHOOK_FORCEINLINE void WriteObject(SafeAddress address, const T& object, bool vp = true)
 	{
 		if (vp)
 		{
 			scoped_unprotect unprotect(address.get(), sizeof(T));
 
-			memcpy((void *)address.get(), &object, sizeof(T));
+			memcpy((void*)address.get(), &object, sizeof(T));
 		}
 		else
 		{
-			memcpy((void *)address.get(), &object, sizeof(T));
+			memcpy((void*)address.get(), &object, sizeof(T));
 		}
 	}
 
@@ -1659,26 +1661,26 @@ namespace SafeHook
 		{
 			scoped_unprotect unprotect(address.get(), sizeof(T));
 
-			*(T *)address.get() = value;
+			*(T*)address.get() = value;
 		}
 		else
 		{
-			*(T *)address.get() = value;
+			*(T*)address.get() = value;
 		}
 	}
 
 	// Writes raw memory to the specified address from the provided data buffer. If vp is true, it temporarily unprotects the memory region to allow writing.
-	SAFEHOOK_FORCEINLINE void WriteMemoryRaw(SafeAddress address, const void *data, size_t size, bool vp = true)
+	SAFEHOOK_FORCEINLINE void WriteMemoryRaw(SafeAddress address, const void* data, size_t size, bool vp = true)
 	{
 		if (vp)
 		{
 			scoped_unprotect unprotect(address.get(), size);
 
-			memcpy((void *)address.get(), data, size);
+			memcpy((void*)address.get(), data, size);
 		}
 		else
 		{
-			memcpy((void *)address.get(), data, size);
+			memcpy((void*)address.get(), data, size);
 		}
 	}
 
@@ -1690,25 +1692,25 @@ namespace SafeHook
 		{
 			scoped_unprotect unprotect(address.get(), sizeof(T));
 
-			return *(T *)address.get();
+			return *(T*)address.get();
 		}
 		else
 		{
-			return *(T *)address.get();
+			return *(T*)address.get();
 		}
 	}
 
 	// Reads raw memory from the specified address into the provided data buffer. If vp is true, it temporarily unprotects the memory region to allow reading.
-	SAFEHOOK_FORCEINLINE void ReadMemoryRaw(SafeAddress address, void *data, size_t size, bool vp = true)
+	SAFEHOOK_FORCEINLINE void ReadMemoryRaw(SafeAddress address, void* data, size_t size, bool vp = true)
 	{
 		if (vp)
 		{
 			scoped_unprotect unprotect(address.get(), size);
-			memcpy(data, (void *)address.get(), size);
+			memcpy(data, (void*)address.get(), size);
 		}
 		else
 		{
-			memcpy(data, (void *)address.get(), size);
+			memcpy(data, (void*)address.get(), size);
 		}
 	}
 
@@ -1717,7 +1719,7 @@ namespace SafeHook
 	{
 		SafeAddress address;
 		size_t size;
-		unsigned char *backup;
+		unsigned char* backup;
 
 	public:
 		scoped_backup() : address(uintptr_t(0)), size(0), backup(nullptr) {}
@@ -1792,8 +1794,8 @@ namespace SafeHook
 	// Get the destination address of a branch instruction (jmp, call, etc.) at the given address.
 	inline uintptr_t GetBranchDestination(SafeAddress address)
 	{
-		hde_s disasm = {0};
-		HDE_DISASM((uint8_t *)(address.get()), &disasm);
+		hde_s disasm = { 0 };
+		HDE_DISASM((uint8_t*)(address.get()), &disasm);
 		CHECK_ERROR(disasm);
 
 		if (disasm.flags & F_RELATIVE)
@@ -1822,7 +1824,7 @@ namespace SafeHook
 				{
 					case 0x10: // call
 					case 0x20: // jmp
-						return *(uintptr_t *)(address.get() + disasm.len + disasm.imm.imm32);
+						return *(uintptr_t*)(address.get() + disasm.len + disasm.imm.imm32);
 					default:
 						break;
 				}
@@ -1866,7 +1868,7 @@ namespace SafeHook
 
 		switch (typeSize)
 		{
-			case sizeof(uint8_t):
+			case sizeof(uint8_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 2);
@@ -1875,7 +1877,7 @@ namespace SafeHook
 				WriteMemory<uint8_t>(src + 1, (uint8_t)MakeRelativeOffset(src, dst, 2), false);
 				break;
 			}
-			case sizeof(uint32_t):
+			case sizeof(uint32_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 5);
@@ -1885,7 +1887,7 @@ namespace SafeHook
 				break;
 			}
 #if SAFEHOOK_X64
-			case sizeof(uint64_t):
+			case sizeof(uint64_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 14);
@@ -1897,7 +1899,7 @@ namespace SafeHook
 				break;
 			}
 #else // upper 2GB bound unlocked by LAA, and in case the dll is loaded in upper 2GB address
-			case sizeof(uint64_t):
+			case sizeof(uint64_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 10); // jmp dword ptr [eip+0] + 4 bytes of pointer
@@ -1927,8 +1929,8 @@ namespace SafeHook
 
 		switch (typeSize)
 		{
-			case sizeof(uint8_t):
-			case sizeof(uint32_t):
+			case sizeof(uint8_t) :
+			case sizeof(uint32_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 5);
@@ -1938,7 +1940,7 @@ namespace SafeHook
 				break;
 			}
 #if SAFEHOOK_X64
-			case sizeof(uint64_t):
+			case sizeof(uint64_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 16);
@@ -1953,7 +1955,7 @@ namespace SafeHook
 				break;
 			}
 #else // LAA, or loaded in upper 2GB bound
-			case sizeof(uint64_t):
+			case sizeof(uint64_t) :
 			{
 				if (vp)
 					x.protect(src.get(), 12); // call dword ptr [eip+0] + 4 bytes of pointer + 2 for jmp +4
@@ -2002,7 +2004,7 @@ namespace SafeHook
 	}
 
 	// whenether there's tricks in assembly that would make hde disassembler fail, we can use this function to safely skip over the instruction and get the next instruction address
-	SAFEHOOK_FORCEINLINE size_t HdeCheckOffsetFor(hde_s *disasm)
+	SAFEHOOK_FORCEINLINE size_t HdeCheckOffsetFor(hde_s* disasm)
 	{
 		if (disasm->opcode == 0xFF && disasm->flags & F_MODRM)
 		{
@@ -2026,25 +2028,25 @@ namespace SafeHook
 	{
 		// cannot really depend on an non-existent trampoline...
 
-		hde_s disasm = {0};
+		hde_s disasm = { 0 };
 		size_t readOffs = 0;
 		size_t size = 0;
 
 		while (readOffs < g_JmpInstructionSize)
 		{
-			HDE_DISASM((uint8_t *)src.get() + readOffs, &disasm);
+			HDE_DISASM((uint8_t*)src.get() + readOffs, &disasm);
 			CHECK_ERROR(disasm);
 
-			uint8_t *p = (uint8_t *)src.get() + readOffs;
+			uint8_t* p = (uint8_t*)src.get() + readOffs;
 			if ((*p >= 0x70 && *p <= 0x7F))
 			{
 #if SAFEHOOK_X64
 				uintptr_t branchDest = GetBranchDestination(p);
 
-				size_t range = GetDistanceTypeSize(p + 2, (uint8_t *)branchDest);
+				size_t range = GetDistanceTypeSize(p + 2, (uint8_t*)branchDest);
 				size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
 
-				size += 2 + jmpSize;	
+				size += 2 + jmpSize;
 #else
 				size += 6; // jcc rel8 -> jcc rel32
 #endif
@@ -2062,16 +2064,14 @@ namespace SafeHook
 			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05)
 			{
 #if SAFEHOOK_X64
-				uint64_t absTarget = *(uint32_t *)(p + disasm.len + disasm.disp.disp32);
+				uint64_t absTarget = *(uint32_t*)(p + disasm.len + disasm.disp.disp32);
 				int64_t newDisp = absTarget - (uintptr_t)(p + disasm.len);
 
 				uint8_t immSize = 0;
 				if (disasm.flags & F_IMM8)       immSize = 1;
 				else if (disasm.flags & F_IMM16) immSize = 2;
 				else if (disasm.flags & F_IMM32) immSize = 4;
-				#if SAFEHOOK_X64
 				else if (disasm.flags & F_IMM64) immSize = 8;
-				#endif
 
 				uint32_t dispOffset = disasm.len - immSize - 4;
 				uint32_t modrmOffset = dispOffset - 1;
@@ -2096,9 +2096,9 @@ namespace SafeHook
 		return size;
 	}
 
-	inline size_t GetByteCodeLength(uint8_t *src, size_t minLength)
+	inline size_t GetByteCodeLength(uint8_t* src, size_t minLength)
 	{
-		hde_s disasm = {0};
+		hde_s disasm = { 0 };
 		size_t readOffs = 0;
 		size_t size = 0;
 
@@ -2116,13 +2116,13 @@ namespace SafeHook
 		return size;
 	}
 
-	// Used to make a trampoline in dst, if the dst is null it will calculate how much bytes is the src
-	inline size_t CreateTrampoline(uint8_t *src, uint8_t *dst, size_t *tramp_size = nullptr, size_t length = -1)
+	[[deprecated("No support for passing nullptr into dst parameter!")]]
+	inline size_t CreateTrampoline(uint8_t*, std::nullptr_t, size_t* = nullptr, size_t = -1);
+	// Used to make a trampoline in dst, does not write into src
+	// Returns the size of the trampoline, tramp_size is size of the trampoline including the jump instruction at the end to continue original code
+	inline size_t CreateTrampoline(uint8_t* src, uint8_t* dst, size_t* tramp_size = nullptr, size_t length = -1)
 	{
-		if (!dst)
-			return GetTrampolineSize(src);
-
-		hde_s disasm = {0};
+		hde_s disasm = { 0 };
 		size_t writeOffs = 0;
 		size_t readOffs = 0;
 
@@ -2137,18 +2137,18 @@ namespace SafeHook
 		{
 			switch (GetDistanceTypeSize(src, dst))
 			{
-				case sizeof(uint8_t):
+				case sizeof(uint8_t) :
 				{
 					jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
 					break;
 				}
-				case sizeof(uint32_t):
+				case sizeof(uint32_t) :
 				{
 					jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
 					break;
 				}
 #if SAFEHOOK_X64
-				case sizeof(uint64_t):
+				case sizeof(uint64_t) :
 				{
 					jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
 					break;
@@ -2168,9 +2168,9 @@ namespace SafeHook
 		{
 			HDE_DISASM(src + readOffs, &disasm);
 			CHECK_ERROR(disasm);
- 
-			uint8_t *p = src + readOffs;
-			uint8_t *q = dst + writeOffs;
+
+			uint8_t* p = src + readOffs;
+			uint8_t* q = dst + writeOffs;
 
 			size_t typeSize = GetDistanceTypeSize(p, dst + writeOffs);
 
@@ -2180,7 +2180,7 @@ namespace SafeHook
 #if SAFEHOOK_X64
 				if (typeSize == sizeof(uint64_t))
 				{
-					size_t range = GetDistanceTypeSize(q + 2, (uint8_t *)branchDest);
+					size_t range = GetDistanceTypeSize(q + 2, (uint8_t*)branchDest);
 					size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
 
 					// Invert the condition code so it skips the long jump if FALSE
@@ -2201,7 +2201,7 @@ namespace SafeHook
 					WriteMemory<uint8_t>(q + 1, (uint8_t)jmpSize, false);
 
 					// 2: jmp branchDest -> executes only if original condition was TRUE
-					MakeJMP(q + 2, (uint8_t *)branchDest, false);
+					MakeJMP(q + 2, (uint8_t*)branchDest, false);
 
 					writeOffs += 2 + jmpSize;
 				}
@@ -2289,7 +2289,8 @@ namespace SafeHook
 				}
 #endif
 			}
-			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05) // RIP relative addressing
+#if SAFEHOOK_X64
+			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05) // RIP relative addressing only for x64
 			{
 				uint32_t oldDisp = disasm.disp.disp32;
 
@@ -2300,13 +2301,10 @@ namespace SafeHook
 				if (disasm.flags & F_IMM8)       immSize = 1;
 				else if (disasm.flags & F_IMM16) immSize = 2;
 				else if (disasm.flags & F_IMM32) immSize = 4;
-				#if SAFEHOOK_X64
 				else if (disasm.flags & F_IMM64) immSize = 8;
-				#endif
 
 				if (newDisp > INT32_MAX || newDisp < INT32_MIN)
 				{
-#if SAFEHOOK_X64
 					uint8_t regField = (disasm.modrm >> 3) & 0x07;
 					bool rexR = (disasm.rex & 0x04) != 0;
 					uint8_t fullReg = (rexR ? 8 : 0) | regField;
@@ -2355,7 +2353,6 @@ namespace SafeHook
 
 					// pop scratchReg (0x58 + scratchReg)
 					WriteMemory<uint8_t>(dst + writeOffs++, 0x58 + scratchReg, false);
-#endif				
 				}
 				else
 				{
@@ -2372,22 +2369,21 @@ namespace SafeHook
 						case F_IMM32:
 							immSize = 4;
 							break;
-#if SAFEHOOK_X64
 						case F_IMM64:
 							immSize = 8;
 							break;
-#endif
 						default:
 							break;
 					}
 
 					uint32_t dispOffset = disasm.len - immSize - 4;
 
-					*(int32_t *)(q + dispOffset) = (int32_t)newDisp;
+					*(int32_t*)(q + dispOffset) = (int32_t)newDisp;
 
 					writeOffs += disasm.len;
 				}
 			}
+#endif
 			else
 			{
 				memcpy(dst + writeOffs, src + readOffs, disasm.len);
@@ -2398,20 +2394,37 @@ namespace SafeHook
 
 		MakeJMP(dst + writeOffs, src + readOffs, false); // jmp back to the original routine after the overwritten bytes
 
+		size_t noJumpSize = writeOffs;
+
+		switch (size_t jmpSize = GetDistanceTypeSize(dst + writeOffs, src + readOffs))
+		{
+			case sizeof(uint8_t) :
+				writeOffs += 2; // 1 byte for opcode + 1 byte for offset
+				break;
+			case sizeof(uint32_t) :
+				writeOffs += 5; // 1 byte for opcode + 4 bytes for offset
+				break;
+			case sizeof(uint64_t) :
+				writeOffs += SAFEHOOK_BY_ARCH(14, 10); // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address (x64) or 10 bytes for jmp dword ptr (x86)
+				break;
+			default:
+				break;
+		}
+
 		if (tramp_size)
 			*tramp_size = writeOffs;
 
-		return readOffs;
+		return noJumpSize;
 	}
 
 	class cTrackHook
 	{
 	protected:
-		void *m_hook;
-		cTrackHook *m_next;
+		void* m_hook;
+		cTrackHook* m_next;
 
 	public:
-		cTrackHook(void *hook, cTrackHook *next) : m_hook(hook), m_next(next) {}
+		cTrackHook(void* hook, cTrackHook* next) : m_hook(hook), m_next(next) {}
 
 		virtual ~cTrackHook() {}
 
@@ -2421,14 +2434,14 @@ namespace SafeHook
 	class cTrackHookHook : public cTrackHook
 	{
 	public:
-		cTrackHookHook(class Hook *hook, cTrackHook *next) : cTrackHook(hook, next) {}
+		cTrackHookHook(class Hook* hook, cTrackHook* next) : cTrackHook(hook, next) {}
 
 		virtual ~cTrackHookHook()
 		{
 			if (m_hook)
 			{
-				class Hook *hook = (class Hook *)m_hook;
-				((void(__thiscall *)(class Hook *))**(void ***)hook)(hook);
+				class Hook* hook = (class Hook*)m_hook;
+				((void(__thiscall*)(class Hook*)) * *(void***)hook)(hook);
 			}
 		}
 	};
@@ -2436,14 +2449,14 @@ namespace SafeHook
 	class cTrackHookMidAsmHook : public cTrackHook
 	{
 	public:
-		cTrackHookMidAsmHook(class MidAsmHook *hook, cTrackHook *next) : cTrackHook(hook, next) {}
+		cTrackHookMidAsmHook(class MidAsmHook* hook, cTrackHook* next) : cTrackHook(hook, next) {}
 
 		virtual ~cTrackHookMidAsmHook()
 		{
 			if (m_hook)
 			{
-				class MidAsmHook *hook = (class MidAsmHook *)m_hook;
-				((void(__thiscall *)(class MidAsmHook *))**(void***)hook)(hook);
+				class MidAsmHook* hook = (class MidAsmHook*)m_hook;
+				((void(__thiscall*)(class MidAsmHook*)) * *(void***)hook)(hook);
 			}
 		}
 	};
@@ -2451,26 +2464,26 @@ namespace SafeHook
 	class cTrackHookInlineHook : public cTrackHook
 	{
 	public:
-		cTrackHookInlineHook(class InlineHook *hook, cTrackHook *next) : cTrackHook(hook, next) {}
+		cTrackHookInlineHook(class InlineHook* hook, cTrackHook* next) : cTrackHook(hook, next) {}
 
 		virtual ~cTrackHookInlineHook()
 		{
 			if (m_hook)
 			{
-				class InlineHook *hook = (class InlineHook *)m_hook;
-				((void(__thiscall *)(class InlineHook *))**(void ***)hook)(hook); // hacky
+				class InlineHook* hook = (class InlineHook*)m_hook;
+				((void(__thiscall*)(class InlineHook*)) * *(void***)hook)(hook); // hacky
 			}
 		}
 	};
 
-	inline cTrackHook *g_trackHooks = nullptr;
+	inline cTrackHook* g_trackHooks = nullptr;
 
 	// This would cleanup every hook that was created, thus forceful shutting down is easier
 	inline void CleanupHooks()
 	{
 		while (g_trackHooks)
 		{
-			cTrackHook *pNext = g_trackHooks->m_next;
+			cTrackHook* pNext = g_trackHooks->m_next;
 			delete g_trackHooks;
 			g_trackHooks = pNext;
 		}
@@ -2478,13 +2491,13 @@ namespace SafeHook
 
 	class InlineHook
 	{
-	
-		uint8_t *m_target;
-		uint8_t *m_hook;
+
+		uint8_t* m_target;
+		uint8_t* m_hook;
 	public:
-		uint8_t *m_trampoline;
-		uint8_t *m_trampolineEntry; // entry point for the code redirection
-		uint8_t *m_exit; // exit point for the trampoline, in case you want to return to the original function without executing the instructions that were overwritten by the hook
+		uint8_t* m_trampoline;
+		uint8_t* m_trampolineEntry; // entry point for the code redirection
+		uint8_t* m_exit; // exit point for the trampoline, in case you want to return to the original function without executing the instructions that were overwritten by the hook
 	private:
 		scoped_backup m_originalBytes;
 		size_t m_coveredSize;
@@ -2501,13 +2514,13 @@ namespace SafeHook
 			};
 		};
 	public:
-		InlineHook(void *pTarget, void *pHook, size_t coverSize = 0)
+		InlineHook(void* pTarget, void* pHook, size_t coverSize = 0)
 		{
 			if (!pTarget || !pHook)
 				SAFEHOOK_THROW("Target and hook addresses cannot be null!");
 
-			m_target = (unsigned char *)pTarget;
-			m_hook = (unsigned char *)pHook;
+			m_target = (unsigned char*)pTarget;
+			m_hook = (unsigned char*)pHook;
 
 			size_t size = GetByteCodeLength(m_target, coverSize ? coverSize : SAFEHOOK_BY_ARCH(5, 14));
 			m_originalBytes.store(pTarget, size);
@@ -2515,13 +2528,11 @@ namespace SafeHook
 			size_t trampSize = GetTrampolineSize(m_target);
 
 #if SAFEHOOK_X64
-			m_trampoline = (unsigned char *)g_pageController.allocNear(m_target, trampSize + 14);
+			m_trampoline = (unsigned char*)g_pageController.allocNear(m_target, trampSize + 14);
 #else
-			m_trampoline = (unsigned char *)g_pageController.alloc(trampSize + coverSize + 10);
+			m_trampoline = (unsigned char*)g_pageController.alloc(trampSize + coverSize + 10);
 #endif
 
-			unsigned char *pPage = m_trampoline;
-		
 			if (!m_trampoline)
 				SAFEHOOK_THROW("Failed to allocate memory for trampoline!");
 
@@ -2531,23 +2542,13 @@ namespace SafeHook
 				m_coveredSize = coverSize;
 			else
 				m_coveredSize = size;
-			m_trampolineEntry = (unsigned char *)pPage;
-
-			size_t range = GetDistanceTypeSize(m_target, m_trampoline + trampSize);
-			size_t m_jmpSize = 0;
-			if (range == sizeof(uint8_t))
-				m_jmpSize = 2;
-			else if (range == sizeof(uint32_t))
-				m_jmpSize = 5;
-			// checking for 64 bit is not necessary, we have full jmp at the end of trampoline
-
-			m_trampoline += m_jmpSize; // we will use the first few bytes for a jump to the hook, so we need to offset the trampoline pointer
 
 			try
 			{
 				CreateTrampoline(m_target, m_trampoline, &trampSize, coverSize ? coverSize : -1);
-				MakeJMP(m_trampoline + trampSize, m_hook, false);
-				MakeJMP(m_trampolineEntry, m_trampoline + trampSize, false);
+
+				m_trampolineEntry = m_trampoline + trampSize;
+				MakeJMP(m_trampolineEntry, m_hook, false);
 			}
 			catch (const SafeHook::Exception& e)
 			{
@@ -2577,7 +2578,7 @@ namespace SafeHook
 			if (bEnabled || !bTrampolineCreated)
 				return;
 
-			SyncLock([&](Vector<DWORD> &threadIds)
+			SyncLock([&](Vector<DWORD>& threadIds)
 			{
 				MakeJMP(m_target, m_trampolineEntry);
 				FlushInstructionCache(GetCurrentProcess(), m_target, m_coveredSize);
@@ -2596,7 +2597,7 @@ namespace SafeHook
 			if (!bEnabled || !bTrampolineCreated)
 				return;
 
-			SyncLock([&](Vector<DWORD> &threadIds)
+			SyncLock([&](Vector<DWORD>& threadIds)
 			{
 				m_originalBytes.restore(false); // Must ensure that address is valid
 				FlushInstructionCache(GetCurrentProcess(), m_target, m_coveredSize);
@@ -2629,9 +2630,9 @@ namespace SafeHook
 
 	class Hook
 	{
-		uint8_t *m_target;
-		uint8_t *m_hook;
-		uint8_t *m_trampolineEntry; // entry point for the code redirection
+		uint8_t* m_target;
+		uint8_t* m_hook;
+		uint8_t* m_trampolineEntry; // entry point for the code redirection
 		size_t m_trampolineSize;
 
 		struct
@@ -2647,7 +2648,7 @@ namespace SafeHook
 				uint32_t i32;
 			};
 		} m_state;
-		uint8_t *m_trampoline;
+		uint8_t* m_trampoline;
 		scoped_backup m_originalBytes;
 
 		void CreateTrampoline()
@@ -2656,29 +2657,28 @@ namespace SafeHook
 			{
 				size_t trampolineSize = GetTrampolineSize(m_target);
 				// scary thing here is that original function code might be 3-4 bytes long, and knowing how sections are operated, we might end up spoiling the next function's code if we are working with no alignment code
-				m_originalBytes.store(m_target, GetByteCodeLength(m_target, 5)); // try relative first
+				size_t originalSize = GetByteCodeLength(m_target, 5);
+				m_originalBytes.store(m_target, originalSize); // try relative first
 
-				void *pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 5 * 2), g_pageController.allocNear(m_target, trampolineSize + 14 * 2)); // 14 to be certain for x64 and x86
+				void* pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 5 * 2), g_pageController.allocNear(m_target, trampolineSize + 14 * 2)); // 14 to be certain for x64 and x86
 #if SAFEHOOK_X64
 				if (!pPage) // allocating near failed, and now we will just try far jmp indirect, FUCK!
 				{
 					m_originalBytes.clear();
-					m_originalBytes.store(m_target, GetByteCodeLength(m_target, 14)); // yay, 14 bytes
+					originalSize = GetByteCodeLength(m_target, 14);
+					m_originalBytes.store(m_target, originalSize); // yay, 14 bytes
 
 					pPage = g_pageController.alloc(trampolineSize + 14);
 				}
 #endif
-				m_trampolineEntry = (unsigned char *)pPage;
+				m_trampoline = (unsigned char*)pPage;
 				if (pPage)
 				{
-					size_t jmpSize = GetDistanceTypeSize(m_target, (unsigned char *)pPage + trampolineSize) + 1;
-					// should be either 2 bytes or 5, since we have a full 14 bytes for x64 at the end of trampoline
+					SafeHook::CreateTrampoline(m_target, m_trampoline, &m_trampolineSize, originalSize);
 
-					m_trampoline = (unsigned char *)pPage + jmpSize;
-					SafeHook::CreateTrampoline(m_target, m_trampoline, &m_trampolineSize, jmpSize);
+					m_trampolineEntry = m_trampoline + m_trampolineSize;
 
-					MakeJMP(m_trampoline + m_trampolineSize, m_hook, false);
-					MakeJMP(m_trampolineEntry, m_trampoline + m_trampolineSize, false);
+					MakeJMP(m_trampolineEntry, m_hook, false);
 
 					m_state.bTrampolineCreated = true;
 				}
@@ -2696,15 +2696,15 @@ namespace SafeHook
 			m_trampolineSize = m_state.i32 = 0;
 		}
 
-		Hook(void *pTarget, void *pHook, bool bEnable = true, void **pOriginal = nullptr)
+		Hook(void* pTarget, void* pHook, bool bEnable = true, void** pOriginal = nullptr)
 		{
 			try
 			{
 				if (!pTarget || !pHook)
 					SAFEHOOK_THROW("Target and hook addresses cannot be null!");
 
-				m_target = (unsigned char *)pTarget;
-				m_hook = (unsigned char *)pHook;
+				m_target = (unsigned char*)pTarget;
+				m_hook = (unsigned char*)pHook;
 				CreateTrampoline();
 
 				if (pOriginal)
@@ -2718,15 +2718,15 @@ namespace SafeHook
 			SAFEHOOK_CATCH(e);
 		}
 
-		Hook(void *pTarget, void *pHook, void **pOriginal)
+		Hook(void* pTarget, void* pHook, void** pOriginal)
 		{
 			try
 			{
 				if (!pTarget || !pHook)
 					SAFEHOOK_THROW("Target and hook addresses cannot be null!");
 
-				m_target = (unsigned char *)pTarget;
-				m_hook = (unsigned char *)pHook;
+				m_target = (unsigned char*)pTarget;
+				m_hook = (unsigned char*)pHook;
 				CreateTrampoline();
 				if (pOriginal)
 					*pOriginal = m_trampoline;
@@ -2746,7 +2746,7 @@ namespace SafeHook
 			m_state.bEnabled = true;
 			if (m_state.bTrampolineCreated && !m_state.bTrampolineLinked)
 			{
-				SyncLock([&](Vector<DWORD> &threadIds)
+				SyncLock([&](Vector<DWORD>& threadIds)
 				{
 					scoped_unprotect unprotect(m_target, m_originalBytes.size);
 
@@ -2765,7 +2765,7 @@ namespace SafeHook
 			m_state.bEnabled = false;
 			if (m_state.bTrampolineCreated && m_state.bTrampolineLinked)
 			{
-				SyncLock([&](Vector<DWORD> &threadIds)
+				SyncLock([&](Vector<DWORD>& threadIds)
 				{
 					m_originalBytes.restore(false); // Must ensure that address is valid
 					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
@@ -2823,13 +2823,13 @@ namespace SafeHook
 		float f32;
 		double f64;
 
-		unsigned char *pi8;
-		unsigned short *pi16;
-		unsigned int *pi32;
-		unsigned __int64 *pi64;
+		unsigned char* pi8;
+		unsigned short* pi16;
+		unsigned int* pi32;
+		unsigned __int64* pi64;
 
-		float *pf32;
-		double *pf64;
+		float* pf32;
+		double* pf64;
 
 		// methods used for moving value with zero extension
 		SAFEHOOK_FORCEINLINE void Set(unsigned char i8)
@@ -2864,11 +2864,11 @@ namespace SafeHook
 
 		float f32;
 
-		unsigned char *pi8;
-		unsigned short *pi16;
-		unsigned int *pi32;
+		unsigned char* pi8;
+		unsigned short* pi16;
+		unsigned int* pi32;
 
-		float *pf32;
+		float* pf32;
 
 		// methods used for moving value with zero extension
 		SAFEHOOK_FORCEINLINE void Set(unsigned char i8)
@@ -3098,27 +3098,27 @@ namespace SafeHook
 #endif
 
 #if defined(_MSC_VER)
-		FPUREG &operator=(double x)
+		FPUREG& operator=(double x)
 		{
 			setDouble(x);
 			return *this;
 		}
-		FPUREG &operator*=(double x)
+		FPUREG& operator*=(double x)
 		{
 			setDouble(toDouble() * x);
 			return *this;
 		}
-		FPUREG &operator/=(double x)
+		FPUREG& operator/=(double x)
 		{
 			setDouble(toDouble() / x);
 			return *this;
 		}
-		FPUREG &operator+=(double x)
+		FPUREG& operator+=(double x)
 		{
 			setDouble(toDouble() + x);
 			return *this;
 		}
-		FPUREG &operator-=(double x)
+		FPUREG& operator-=(double x)
 		{
 			setDouble(toDouble() - x);
 			return *this;
@@ -3149,51 +3149,51 @@ namespace SafeHook
 			return result;
 		}
 #else
-		FPUREG &operator=(long double x)
+		FPUREG& operator=(long double x)
 		{
 			setLongDouble(x);
 			return *this;
 		}
-		FPUREG &operator*=(long double x)
+		FPUREG& operator*=(long double x)
 		{
 			setLongDouble(toLongDouble() * x);
 			return *this;
 		}
-		FPUREG &operator/=(long double x)
+		FPUREG& operator/=(long double x)
 		{
 			setLongDouble(toLongDouble() / x);
 			return *this;
 		}
-		FPUREG &operator+=(long double x)
+		FPUREG& operator+=(long double x)
 		{
 			setLongDouble(toLongDouble() + x);
 			return *this;
 		}
-		FPUREG &operator-=(long double x)
+		FPUREG& operator-=(long double x)
 		{
 			setLongDouble(toLongDouble() - x);
 			return *this;
 		}
 
-		FPUREG &operator*(long double x) const
+		FPUREG& operator*(long double x) const
 		{
 			FPUREG result;
 			result.setLongDouble(toLongDouble() * x);
 			return result;
 		}
-		FPUREG &operator/(long double x) const
+		FPUREG& operator/(long double x) const
 		{
 			FPUREG result;
 			result.setLongDouble(toLongDouble() / x);
 			return result;
 		}
-		FPUREG &operator+(long double x) const
+		FPUREG& operator+(long double x) const
 		{
 			FPUREG result;
 			result.setLongDouble(toLongDouble() + x);
 			return result;
 		}
-		FPUREG &operator-(long double x) const
+		FPUREG& operator-(long double x) const
 		{
 			FPUREG result;
 			result.setLongDouble(toLongDouble() - x);
@@ -3261,12 +3261,12 @@ namespace SafeHook
 		REG saved_esp;
 		REG ebp;
 
-		REG &eax() { return *(REG *)(saved_esp.i32); }
-		EFLAGS &eflags() { return *(EFLAGS *)(saved_esp.i32 + 4); }
+		REG& eax() { return *(REG*)(saved_esp.i32); }
+		EFLAGS& eflags() { return *(EFLAGS*)(saved_esp.i32 + 4); }
 		const REG esp() const { return (REG)(saved_esp.i32 + 0xC); } // you are not allowed to modify stack pointer
 
-		XMMREG &xmm(int i _In_range_(0, 7)) { return FPUandSSE.xmm[i]; }
-		FPUREG &st(int i _In_range_(-1, 7))
+		XMMREG& xmm(int i _In_range_(0, 7)) { return FPUandSSE.xmm[i]; }
+		FPUREG& st(int i _In_range_(-1, 7))
 		{
 			if (i == -1)
 				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
@@ -3274,7 +3274,7 @@ namespace SafeHook
 				return FPUandSSE.FPU.st[i];
 		}
 
-		uintptr_t &return_address() { return *(uintptr_t *)(saved_esp.i32 + 0x8); }
+		uintptr_t& return_address() { return *(uintptr_t*)(saved_esp.i32 + 0x8); }
 		void set_return_address(uintptr_t addr) { return_address() = addr; }
 	} CTX;
 #else
@@ -3298,12 +3298,12 @@ namespace SafeHook
 		REG r14;
 		REG r15;
 
-		REG &rax() { return *(REG *)(saved_rsp.i64); }
-		RFLAGS &rflags() { return *(RFLAGS *)(saved_rsp.i64 + 8); }
+		REG& rax() { return *(REG*)(saved_rsp.i64); }
+		RFLAGS& rflags() { return *(RFLAGS*)(saved_rsp.i64 + 8); }
 		const REG rsp() const { return (REG)(saved_rsp.i64 + 0x18); } // you are not allowed to modify stack pointer
 
-		XMMREG &xmm(int i _In_range_(0, 15)) { return FPUandSSE.xmm[i]; }
-		FPUREG &st(int i _In_range_(-1, 7))
+		XMMREG& xmm(int i _In_range_(0, 15)) { return FPUandSSE.xmm[i]; }
+		FPUREG& st(int i _In_range_(-1, 7))
 		{
 			if (i == -1)
 				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
@@ -3311,7 +3311,7 @@ namespace SafeHook
 				return FPUandSSE.FPU.st[i];
 		}
 
-		uintptr_t &return_address() { return *(uintptr_t *)(saved_rsp.i64 + 0x10); }
+		uintptr_t& return_address() { return *(uintptr_t*)(saved_rsp.i64 + 0x10); }
 		void set_return_address(uintptr_t addr) { return_address() = addr; }
 	};
 #endif
@@ -3322,15 +3322,15 @@ namespace SafeHook
 	private:
 		scoped_backup original_cave_bytes;
 		SafeAddress cave_address;
-		unsigned char *hook_bytes = nullptr;
+		unsigned char* hook_bytes = nullptr;
 
 	public:
 		MidAsmHookUnsafe() = default;
 
-		MidAsmHookUnsafe(SafeAddress address_of_cave, void(__cdecl *hook_func)(CTX &))
+		MidAsmHookUnsafe(SafeAddress address_of_cave, void(__cdecl* hook_func)(CTX&))
 		{
 			cave_address = address_of_cave;
-			hook_bytes = (unsigned char *)g_pageController.alloc(sizeof(asm_data) + g_JmpInstructionSize); // allocate memory for the hook code and the jump back to the original function
+			hook_bytes = (unsigned char*)g_pageController.alloc(sizeof(asm_data) + g_JmpInstructionSize); // allocate memory for the hook code and the jump back to the original function
 			if (!hook_bytes)
 				SAFEHOOK_THROW("Failed to allocate memory for hook bytes!");
 
@@ -3362,7 +3362,7 @@ namespace SafeHook
 	{
 	private:
 		MidAsmHookUnsafe unsafe_hook;
-		unsigned char *trampoline = nullptr;
+		unsigned char* trampoline = nullptr;
 		scoped_backup original_bytes;
 		SafeHook::SafeAddress address;
 	public:
@@ -3386,42 +3386,48 @@ namespace SafeHook
 		// Try to find a place to inject the trampoline
 		// You cannot just put a trampoline in the middle of instruction and expect it to work
 		SAFEHOOK_BY_ARCH(
-			void handleTrampoline(uintptr_t _address, size_t &orig_size),
-			void handleTrampoline(uintptr_t _address, size_t &orig_size, bool bTryAllocNear = true))
+			void handleTrampoline(uintptr_t _address, size_t& orig_size),
+			void handleTrampoline(uintptr_t _address, size_t& orig_size, bool bTryAllocNear = true))
 		{
 			size_t orignal_size = GetTrampolineSize(_address);
-
 #if SAFEHOOK_X64
 			if (bTryAllocNear)
 			{
-				trampoline = (unsigned char *)g_pageController.allocNear((void *)_address, orignal_size + g_JmpInstructionSize * 2);
+				trampoline = (unsigned char*)g_pageController.allocNear((void*)_address, orignal_size + g_JmpInstructionSize * 2);
+				orig_size = GetByteCodeLength((unsigned char*)_address, 5);
 				if (!trampoline)
-					trampoline = (unsigned char *)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+				{
+					trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+					orig_size = GetByteCodeLength((unsigned char*)_address, 14);
+				}
 			}
 			else
 #endif
 			{
-				trampoline = (unsigned char *)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+				trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+				orig_size = GetByteCodeLength((unsigned char*)_address, 5);
 			}
 			if (!this->trampoline)
 			{
-				SAFEHOOK_THROW_FORMAT("Failed to allocate memory for %p!", (void *)_address);
+				SAFEHOOK_THROW_FORMAT("Failed to allocate memory for %p!", (void*)_address);
 			}
 			size_t typeSize = GetDistanceTypeSize(trampoline, _address + orignal_size);
 			size_t jmpSize = 0;
+			size_t callSize = 0;
 			switch (typeSize)
 			{
 				case 1:
 					jmpSize = 2;
+					callSize = 5;
 					break;
 				case 4:
 					jmpSize = 5;
+					callSize = 5;
 					break;
-#if SAFEHOOK_X64
 				case 8:
-					jmpSize = 14;
+					jmpSize = SAFEHOOK_BY_ARCH(10, 14);
+					callSize = SAFEHOOK_BY_ARCH(12, 16);
 					break;
-#endif
 				default:
 					break;
 			}
@@ -3429,8 +3435,9 @@ namespace SafeHook
 			MakeNOP(trampoline, jmpSize, false);
 
 			size_t trampSize = 0;
-			orig_size = CreateTrampoline((unsigned char *)_address, this->trampoline + jmpSize, &trampSize);
-			exit_address = _address + trampSize + jmpSize;
+			size_t noJmpSize = CreateTrampoline((unsigned char*)_address, this->trampoline + jmpSize, &trampSize);
+
+			exit_address = _address + noJmpSize + jmpSize;
 		}
 
 	public:
@@ -3444,7 +3451,7 @@ namespace SafeHook
 			if (bEnabled || !bTrampolineCreated)
 				return;
 
-			SyncLock([&](Vector<DWORD> &threadIds)
+			SyncLock([&](Vector<DWORD>& threadIds)
 			{
 				size_t orig_size = original_bytes.size;
 
@@ -3472,7 +3479,7 @@ namespace SafeHook
 			if (!bEnabled || !bTrampolineCreated)
 				return;
 
-			SyncLock([&](Vector<DWORD> &threadIds)
+			SyncLock([&](Vector<DWORD>& threadIds)
 			{
 				size_t orig_size = original_bytes.size;
 
@@ -3487,7 +3494,7 @@ namespace SafeHook
 			bEnabled = false;
 		}
 
-		MidAsmHook(SafeAddress _address, void(__cdecl *hook_func)(CTX &))
+		MidAsmHook(SafeAddress _address, void(__cdecl* hook_func)(CTX&))
 		{
 			i32 = 0;
 			address = _address;
@@ -3551,8 +3558,8 @@ namespace SafeHook
 #if SAFEHOOK_TEST
 	inline void TestPageController()
 	{
-		void *p = g_pageController.alloc(PageController::PAGE_SIZE);
-		void *p2 = g_pageController.alloc(PageController::PAGE_SIZE); // generally two pages
+		void* p = g_pageController.alloc(PageController::PAGE_SIZE);
+		void* p2 = g_pageController.alloc(PageController::PAGE_SIZE); // generally two pages
 
 		g_pageController.release(p); // check if the page controller can handle releasing pages correctly, tested only.. via debugging? Is this even a test? Maybe...
 		g_pageController.release(p2);
