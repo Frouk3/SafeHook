@@ -476,6 +476,44 @@ namespace SafeHook
 		return (mbi.State == MEM_COMMIT) && ((mbi.Protect & PAGE_NOACCESS) == 0);
 	}
 
+	class scoped_slim_lock
+	{
+		PSRWLOCK m_lock;
+
+	public:
+		scoped_slim_lock(PSRWLOCK lock) : m_lock(lock)
+		{
+			if (m_lock)
+				AcquireSRWLockExclusive(m_lock);
+		}
+
+		~scoped_slim_lock()
+		{
+			if (m_lock)
+				ReleaseSRWLockExclusive(m_lock);
+		}
+	};
+
+	class scoped_slim_lock_shared
+	{
+		PSRWLOCK m_lock;
+
+	public:
+		scoped_slim_lock_shared(PSRWLOCK lock) : m_lock(lock)
+		{
+			if (m_lock)
+				AcquireSRWLockShared(m_lock);
+		}
+
+		~scoped_slim_lock_shared()
+		{
+			if (m_lock)
+				ReleaseSRWLockShared(m_lock);
+		}
+	};
+
+	inline SRWLOCK g_slimLock = SRWLOCK_INIT;
+
 	template <typename T>
 	class Vector
 	{
@@ -483,7 +521,7 @@ namespace SafeHook
 		T *m_end = nullptr;	 // allocated end
 		T *m_last = nullptr; // last element
 
-		using isPtr = std::is_pointer<T>::value_type;
+		using isPtr = std::is_pointer<T>::value;
 
 		// Allocates memory for the vector
 		// Will potentially grow exponentially if newCapacity is 0
@@ -1112,6 +1150,8 @@ namespace SafeHook
 				m_end = other.m_end;
 				m_pFirstBlock = other.m_pFirstBlock;
 				m_pLastBlock = other.m_pLastBlock;
+
+				return *this;
 			}
 
 			Page &operator=(Page &&other)
@@ -1309,6 +1349,7 @@ namespace SafeHook
 
 			void *alloc(size_t size, size_t alignment = SAFEHOOK_BY_ARCH(32, 64))
 			{
+				scoped_slim_lock lock(&g_slimLock); // prevent multiple threads from allocating at the same time, which could lead to memory corruption
 				for (Page &page : m_pages)
 				{
 					void *ptr = page.alloc(size, alignment);
@@ -1332,6 +1373,8 @@ namespace SafeHook
 
 			void free(void *ptr)
 			{
+				scoped_slim_lock lock(&g_slimLock); // prevent multiple threads from freeing at the same time, which could lead to memory corruption
+
 				if (!ptr)
 					return;
 
@@ -1384,6 +1427,7 @@ namespace SafeHook
 					return ptr;
 			}
 
+			scoped_slim_lock lock(&g_slimLock); // couldn't allocate already or no regions exist
 			AllocationRegion *pRegion = new AllocationRegion();
 			if (!pRegion->init(VIRTUAL_PAGE_SIZE))
 			{
@@ -1426,6 +1470,7 @@ namespace SafeHook
 
 		void release(void *ptr)
 		{
+			scoped_slim_lock lock(&g_slimLock);
 			if (!ptr)
 				return;
 
@@ -1482,6 +1527,32 @@ namespace SafeHook
 
 	inline PageController g_pageController;
 
+#if SAFEHOOK_X64
+	// Class to initialize a page for a specific module, ensuring that the page is allocated near the module's base address that is important for x64 hooking scenarios.	
+	class PageControllerPageInitModule
+	{
+	public:
+		PageControllerPageInitModule(const char *moduleName)
+		{
+			HMODULE hModule = GetModuleHandleA(moduleName);
+			if (!hModule)
+				SAFEHOOK_THROW_FORMAT("Could not get module handle for %s", moduleName);
+
+			MEMORY_BASIC_INFORMATION mbi{0};
+			if (!VirtualQuery((LPCVOID)hModule, &mbi, sizeof(mbi)))
+				SAFEHOOK_THROW_FORMAT("Could not query memory information for module %s", moduleName);
+
+			if (mbi.State != MEM_COMMIT)
+				SAFEHOOK_THROW_FORMAT("Module %s is not committed in memory!", moduleName);
+
+			if (mbi.RegionSize < PageController::VIRTUAL_PAGE_SIZE)
+				SAFEHOOK_THROW_FORMAT("Module %s is smaller than the virtual page size!", moduleName);
+
+			g_pageController.allocRegionMod((void *)mbi.BaseAddress, PageController::VIRTUAL_PAGE_SIZE);
+		}
+	};
+#endif
+
 	class scoped_unprotect
 	{
 		SafeAddress address;
@@ -1529,50 +1600,29 @@ namespace SafeHook
 		}
 	};
 
-	class scoped_slim_lock
-	{
-		PSRWLOCK m_lock;
-
-	public:
-		scoped_slim_lock(PSRWLOCK lock) : m_lock(lock)
-		{
-			if (m_lock)
-				AcquireSRWLockExclusive(m_lock);
-		}
-
-		~scoped_slim_lock()
-		{
-			if (m_lock)
-				ReleaseSRWLockExclusive(m_lock);
-		}
-	};
-
-	class scoped_slim_lock_shared
-	{
-		PSRWLOCK m_lock;
-
-	public:
-		scoped_slim_lock_shared(PSRWLOCK lock) : m_lock(lock)
-		{
-			if (m_lock)
-				AcquireSRWLockShared(m_lock);
-		}
-
-		~scoped_slim_lock_shared()
-		{
-			if (m_lock)
-				ReleaseSRWLockShared(m_lock);
-		}
-	};
-
-	inline SRWLOCK g_slimLock = SRWLOCK_INIT;
-
 	// Executes a function while holding a slim lock to ensure thread safety and prevent race conditions.
 	template <typename T>
 	SAFEHOOK_FORCEINLINE void Sync(T func)
 	{
 		scoped_slim_lock scopedLock(&g_slimLock);
 		func();
+	}
+
+	template <typename T>
+	SAFEHOOK_FORCEINLINE void SyncLock(T func)
+	{
+		scoped_slim_lock scopedLock(&g_slimLock);
+		Vector<DWORD> threadIds;
+		if (EnumerateThreads(threadIds))
+		{
+			SuspendThreads(threadIds);
+			func(threadIds);
+			ResumeThreads(threadIds);
+		}
+		else
+		{
+			func();
+		}
 	}
 
 	// Fills a memory region with the specified value. If vp is true, it temporarily unprotects the memory region to allow writing.
@@ -1723,6 +1773,7 @@ namespace SafeHook
 				}
 
 				WriteMemoryRaw(address, backup, size);
+				FlushInstructionCache(GetCurrentProcess(), (LPCVOID)address.get(), size);
 			}
 		}
 
@@ -1962,9 +2013,9 @@ namespace SafeHook
 		{
 			switch (disasm->modrm & 0x38)
 			{
-				case 0x10:										// call
+				case 0x10:	// call
 					return disasm->len + 2 + sizeof(uintptr_t); // skip jmp that was made after the call
-				case 0x20:										// jmp
+				case 0x20:	// jmp
 					return disasm->len + sizeof(uintptr_t);
 				default:
 					break;
@@ -1975,6 +2026,7 @@ namespace SafeHook
 	}
 
 	// Returns assumed size of the trampoline, which is the number of bytes needed to copy from the source address to create a trampoline. This function disassembles the instructions at the source address until it has enough bytes to accommodate a jump instruction.
+	// Note: If you're unsure about trampoline size, add a few extra bytes to be safe
 	inline size_t GetTrampolineSize(SafeAddress src)
 	{
 		// cannot really depend on an non-existent trampoline...
@@ -1991,21 +2043,52 @@ namespace SafeHook
 			uint8_t *p = (uint8_t *)src.get() + readOffs;
 			if ((*p >= 0x70 && *p <= 0x7F))
 			{
-				size += 6; // jcc rel8 -> jcc rel32
 #if SAFEHOOK_X64
-				// hope that the trampoline won't get too far away
-				// unless we make a some sort of label jumping(e.g. condition ? jmp original : jmp trampoline), that would be full disassembler implementation
+				uintptr_t branchDest = GetBranchDestination(p);
+
+				size_t range = GetDistanceTypeSize(p + 2, (uint8_t *)branchDest);
+				size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
+
+				size += 2 + jmpSize;	
+#else
+				size += 6; // jcc rel8 -> jcc rel32
 #endif
 			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
-				size += SAFEHOOK_BY_ARCH(5, 14);
+				size += SAFEHOOK_BY_ARCH(5, *p == 0xE8 ? 16 : 14);
 			}
 			else if (*p == 0xFF)
 			{
 				size_t sz = HdeCheckOffsetFor(&disasm);
 				size += sz;
 				disasm.len = sz;
+			}
+			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05)
+			{
+#if SAFEHOOK_X64
+				uint64_t absTarget = *(uint32_t *)(p + disasm.len + disasm.disp.disp32);
+				int64_t newDisp = absTarget - (uintptr_t)(p + disasm.len);
+
+				uint8_t immSize = 0;
+				if (disasm.flags & F_IMM8)       immSize = 1;
+				else if (disasm.flags & F_IMM16) immSize = 2;
+				else if (disasm.flags & F_IMM32) immSize = 4;
+				#if SAFEHOOK_X64
+				else if (disasm.flags & F_IMM64) immSize = 8;
+				#endif
+
+				uint32_t dispOffset = disasm.len - immSize - 4;
+				uint32_t modrmOffset = dispOffset - 1;
+				if (newDisp < INT32_MIN || newDisp > INT32_MAX)
+				{
+					size += 13 + immSize + modrmOffset; // push scratchReg; mov scratchReg, absTarget; original instr - src->scratchReg; pop scratchReg;
+				}
+				else
+#endif
+				{
+					size += disasm.len;
+				}
 			}
 			else
 			{
@@ -2039,7 +2122,7 @@ namespace SafeHook
 	}
 
 	// Used to make a trampoline in dst, if the dst is null it will calculate how much bytes is the src
-	inline size_t CreateTrampoline(uint8_t *src, uint8_t *dst, size_t *tramp_size = nullptr)
+	inline size_t CreateTrampoline(uint8_t *src, uint8_t *dst, size_t *tramp_size = nullptr, size_t length = -1)
 	{
 		if (!dst)
 			return GetTrampolineSize(src);
@@ -2055,28 +2138,35 @@ namespace SafeHook
 		// if you are reading this, use writing without virtual protect, we should be fast, not being a slowpoke
 
 		size_t jmpInstruction = 0;
-		switch (GetDistanceTypeSize(src, dst))
+		if (length == -1)
 		{
-			case sizeof(uint8_t):
+			switch (GetDistanceTypeSize(src, dst))
 			{
-				jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
-				break;
-			}
-			case sizeof(uint32_t):
-			{
-				jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
-				break;
-			}
+				case sizeof(uint8_t):
+				{
+					jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
+					break;
+				}
+				case sizeof(uint32_t):
+				{
+					jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
+					break;
+				}
 #if SAFEHOOK_X64
-			case sizeof(uint64_t):
-			{
-				jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
-				break;
-			}
+				case sizeof(uint64_t):
+				{
+					jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
+					break;
+				}
 #endif
-			default:
-				// SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
-				break;
+				default:
+					// SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
+					break;
+			}
+		}
+		else
+		{
+			jmpInstruction = length;
 		}
 
 		while (readOffs < jmpInstruction)
@@ -2094,7 +2184,32 @@ namespace SafeHook
 				uintptr_t branchDest = GetBranchDestination(p);
 #if SAFEHOOK_X64
 				if (typeSize == sizeof(uint64_t))
-					SAFEHOOK_THROW("Jcc does not support 64-bit relative offsets!");
+				{
+					size_t range = GetDistanceTypeSize(q + 2, (uint8_t *)branchDest);
+					size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
+
+					// Invert the condition code so it skips the long jump if FALSE
+					uint8_t shortJccOpcode;
+					if (*p == 0x0F)
+					{
+						// 0x0F 0x8x -> 0x7x, inverted via XOR 1
+						shortJccOpcode = (*(p + 1) - 0x10) ^ 1;
+					}
+					else
+					{
+						// 0x7x -> inverted via XOR 1
+						shortJccOpcode = *p ^ 1;
+					}
+
+					// 0: j!cc +jmpSize -> skips over the long jump to (q + 2 + jmpSize)
+					WriteMemory<uint8_t>(q, shortJccOpcode, false);
+					WriteMemory<uint8_t>(q + 1, (uint8_t)jmpSize, false);
+
+					// 2: jmp branchDest -> executes only if original condition was TRUE
+					MakeJMP(q + 2, (uint8_t *)branchDest, false);
+
+					writeOffs += 2 + jmpSize;
+				}
 #endif
 				WriteMemory<uint8_t>(q, 0x0F, false);
 				WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1), false);
@@ -2179,7 +2294,6 @@ namespace SafeHook
 				}
 #endif
 			}
-#if SAFEHOOK_X64
 			else if (disasm.flags & F_MODRM && (disasm.modrm & 0xC7) == 0x05) // RIP relative addressing
 			{
 				uint32_t oldDisp = disasm.disp.disp32;
@@ -2187,36 +2301,98 @@ namespace SafeHook
 				uint64_t absTarget = (uint64_t)(p + disasm.len + oldDisp);
 				int64_t newDisp = absTarget - (uint64_t)(q + disasm.len);
 
-				if (newDisp > INT32_MAX || newDisp < INT32_MIN)
-					SAFEHOOK_REPORT_HERE("Displacement is too far for RIP relative addressing! %p -> %p", p, q);
-
 				uint8_t immSize = 0;
-				memcpy(dst + writeOffs, src + readOffs, disasm.len);
-				switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | F_IMM64))
+				if (disasm.flags & F_IMM8)       immSize = 1;
+				else if (disasm.flags & F_IMM16) immSize = 2;
+				else if (disasm.flags & F_IMM32) immSize = 4;
+				#if SAFEHOOK_X64
+				else if (disasm.flags & F_IMM64) immSize = 8;
+				#endif
+
+				if (newDisp > INT32_MAX || newDisp < INT32_MIN)
 				{
-					case F_IMM8:
-						immSize = 1;
-						break;
-					case F_IMM16:
-						immSize = 2;
-						break;
-					case F_IMM32:
-						immSize = 4;
-						break;
-					case F_IMM64:
-						immSize = 8;
-						break;
-					default:
-						break;
+#if SAFEHOOK_X64
+					uint8_t regField = (disasm.modrm >> 3) & 0x07;
+					bool rexR = (disasm.rex & 0x04) != 0;
+					uint8_t fullReg = (rexR ? 8 : 0) | regField;
+
+					// Pick scratch register: RAX (0) or RCX (1)
+					// Avoid the register modified/read in the reg field
+					uint8_t scratchReg = (fullReg == 0) ? 1 : 0;
+
+					// push scratchReg (0x50 + scratchReg)
+					WriteMemory<uint8_t>(dst + writeOffs++, 0x50 + scratchReg, false);
+
+					// mov scratchReg, absTarget (REX.W + 0xB8+reg + 8-byte imm)
+					WriteMemory<uint8_t>(dst + writeOffs++, 0x48, false);
+					WriteMemory<uint8_t>(dst + writeOffs++, 0xB8 + scratchReg, false);
+					WriteMemory<uint64_t>(dst + writeOffs, absTarget, false);
+					writeOffs += 8;
+
+					// Copy instruction bytes up to ModR/M
+					// dispOffset is where disp32 started
+					uint32_t dispOffset = disasm.len - immSize - 4;
+					uint32_t modrmOffset = dispOffset - 1;
+
+					// Copy prefixes and opcodes before ModR/M
+					memcpy(dst + writeOffs, src + readOffs, modrmOffset);
+					writeOffs += modrmOffset;
+
+					// Ensure REX.B is 0 so scratchReg maps to RAX (0) or RCX (1), not R8/R9
+					if (disasm.rex)
+					{
+						// REX prefix is located at the REX position; clear REX.B (bit 0)
+						uint8_t* pRex = dst + (writeOffs - modrmOffset) + disasm.rex_offset;
+						*pRex &= ~0x01;
+					}
+
+					// Rewrite ModR/M byte: keep 'reg' (bits 3-5), clear mod (bits 6-7), set r/m to scratchReg
+					uint8_t newModRM = (disasm.modrm & 0x38) | (scratchReg & 0x07);
+					WriteMemory<uint8_t>(dst + writeOffs++, newModRM, false);
+
+					// Copy immediate if present (skipping the original 4-byte disp)
+					if (immSize > 0)
+					{
+						uint32_t immSrcOffset = disasm.len - immSize;
+						memcpy(dst + writeOffs, src + readOffs + immSrcOffset, immSize);
+						writeOffs += immSize;
+					}
+
+					// pop scratchReg (0x58 + scratchReg)
+					WriteMemory<uint8_t>(dst + writeOffs++, 0x58 + scratchReg, false);
+#endif				
 				}
-
-				uint32_t dispOffset = disasm.len - immSize - 4;
-
-				*(int32_t *)(q + dispOffset) = (int32_t)newDisp;
-
-				writeOffs += disasm.len;
-			}
+				else
+				{
+					uint8_t immSize = 0;
+					memcpy(dst + writeOffs, src + readOffs, disasm.len);
+					switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
+					{
+						case F_IMM8:
+							immSize = 1;
+							break;
+						case F_IMM16:
+							immSize = 2;
+							break;
+						case F_IMM32:
+							immSize = 4;
+							break;
+#if SAFEHOOK_X64
+						case F_IMM64:
+							immSize = 8;
+							break;
 #endif
+						default:
+							break;
+					}
+
+					uint32_t dispOffset = disasm.len - immSize - 4;
+
+					*(int32_t *)(q + dispOffset) = (int32_t)newDisp;
+
+					writeOffs += disasm.len;
+				}
+			}
 			else
 			{
 				memcpy(dst + writeOffs, src + readOffs, disasm.len);
@@ -2257,7 +2433,7 @@ namespace SafeHook
 			if (m_hook)
 			{
 				class Hook *hook = (class Hook *)m_hook;
-				((void(__thiscall *)(class Hook *)) * *(void ***)hook)(hook);
+				((void(__thiscall *)(class Hook *))**(void ***)hook)(hook);
 			}
 		}
 	};
@@ -2272,7 +2448,22 @@ namespace SafeHook
 			if (m_hook)
 			{
 				class MidAsmHook *hook = (class MidAsmHook *)m_hook;
-				((void(__thiscall *)(class MidAsmHook *)) * *(void ***)hook)(hook);
+				((void(__thiscall *)(class MidAsmHook *))**(void***)hook)(hook);
+			}
+		}
+	};
+
+	class cTrackHookInlineHook : public cTrackHook
+	{
+	public:
+		cTrackHookInlineHook(class InlineHook *hook, cTrackHook *next) : cTrackHook(hook, next) {}
+
+		virtual ~cTrackHookInlineHook()
+		{
+			if (m_hook)
+			{
+				class InlineHook *hook = (class InlineHook *)m_hook;
+				((void(__thiscall *)(class InlineHook *))**(void ***)hook)(hook); // hacky
 			}
 		}
 	};
@@ -2290,10 +2481,162 @@ namespace SafeHook
 		}
 	}
 
+	class InlineHook
+	{
+	
+		uint8_t *m_target;
+		uint8_t *m_hook;
+	public:
+		uint8_t *m_trampoline;
+		uint8_t *m_trampolineEntry; // entry point for the code redirection
+		uint8_t *m_exit; // exit point for the trampoline, in case you want to return to the original function without executing the instructions that were overwritten by the hook
+	private:
+		scoped_backup m_originalBytes;
+		size_t m_coveredSize;
+		struct
+		{
+			union
+			{
+				struct
+				{
+					uint32_t bEnabled : 1;
+					uint32_t bTrampolineCreated : 1;
+				};
+				uint32_t i32;
+			};
+		};
+	public:
+		InlineHook(void *pTarget, void *pHook, size_t coverSize = 0)
+		{
+			if (!pTarget || !pHook)
+				SAFEHOOK_THROW("Target and hook addresses cannot be null!");
+
+			m_target = (unsigned char *)pTarget;
+			m_hook = (unsigned char *)pHook;
+
+			size_t size = GetByteCodeLength(m_target, coverSize ? coverSize : SAFEHOOK_BY_ARCH(5, 14));
+			m_originalBytes.store(pTarget, size);
+
+			size_t trampSize = GetTrampolineSize(m_target);
+
+#if SAFEHOOK_X64
+			m_trampoline = (unsigned char *)g_pageController.allocNear(m_target, trampSize + 14);
+#else
+			m_trampoline = (unsigned char *)g_pageController.alloc(trampSize + coverSize + 10);
+#endif
+
+			unsigned char *pPage = m_trampoline;
+		
+			if (!m_trampoline)
+				SAFEHOOK_THROW("Failed to allocate memory for trampoline!");
+
+			bTrampolineCreated = true;
+
+			if (coverSize)
+				m_coveredSize = coverSize;
+			else
+				m_coveredSize = size;
+			m_trampolineEntry = (unsigned char *)pPage;
+
+			size_t range = GetDistanceTypeSize(m_target, m_trampoline + trampSize);
+			size_t m_jmpSize = 0;
+			if (range == sizeof(uint8_t))
+				m_jmpSize = 2;
+			else if (range == sizeof(uint32_t))
+				m_jmpSize = 5;
+			// checking for 64 bit is not necessary, we have full jmp at the end of trampoline
+
+			m_trampoline += m_jmpSize; // we will use the first few bytes for a jump to the hook, so we need to offset the trampoline pointer
+
+			try
+			{
+				CreateTrampoline(m_target, m_trampoline, &trampSize, coverSize ? coverSize : -1);
+				MakeJMP(m_trampoline + trampSize, m_hook, false);
+				MakeJMP(m_trampolineEntry, m_trampoline + trampSize, false);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create trampoline for inline hook! Reason below:\n");
+				SafeHook::ReportException(e);
+				return;
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create trampoline for inline hook! Reason unknown.\n");
+				return;
+			}
+			bTrampolineCreated = true;
+
+			m_exit = m_trampoline + trampSize;
+
+			g_trackHooks = new cTrackHookInlineHook(this, g_trackHooks);
+
+			Enable();
+		}
+
+		void Enable()
+		{
+			if (!SafeHook::SafeAddress(m_target).IsValid())
+				return;
+
+			if (bEnabled || !bTrampolineCreated)
+				return;
+
+			SyncLock([&](Vector<DWORD> &threadIds)
+			{
+				MakeJMP(m_target, m_trampolineEntry);
+				FlushInstructionCache(GetCurrentProcess(), m_target, m_coveredSize);
+
+				RedirectThreads(threadIds, m_target, m_coveredSize, m_trampolineEntry);
+			});
+
+			bEnabled = true;
+		}
+
+		void Disable()
+		{
+			if (!SafeHook::SafeAddress(m_target).IsValid())
+				return;
+
+			if (!bEnabled || !bTrampolineCreated)
+				return;
+
+			SyncLock([&](Vector<DWORD> &threadIds)
+			{
+				m_originalBytes.restore(false); // Must ensure that address is valid
+				FlushInstructionCache(GetCurrentProcess(), m_target, m_coveredSize);
+
+				RedirectThreads(threadIds, m_trampolineEntry, m_coveredSize, m_target);
+			});
+
+			bEnabled = false;
+		}
+
+		~InlineHook()
+		{
+			Disable();
+
+			if (m_trampoline)
+			{
+				g_pageController.release(m_trampoline);
+				m_trampoline = nullptr;
+			}
+
+			m_target = m_hook = m_exit = nullptr;
+			i32 = 0;
+		}
+
+		virtual void OnDestruct()
+		{
+			this->~InlineHook();
+		}
+	};
+
 	class Hook
 	{
 		uint8_t *m_target;
 		uint8_t *m_hook;
+		uint8_t *m_trampolineEntry; // entry point for the code redirection
 		size_t m_trampolineSize;
 
 		struct
@@ -2320,7 +2663,7 @@ namespace SafeHook
 				// scary thing here is that original function code might be 3-4 bytes long, and knowing how sections are operated, we might end up spoiling the next function's code if we are working with no alignment code
 				m_originalBytes.store(m_target, GetByteCodeLength(m_target, 5)); // try relative first
 
-				void *pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 14), g_pageController.allocNear(m_target, trampolineSize + 14)); // 14 to be certain for x64 and x86
+				void *pPage = SAFEHOOK_BY_ARCH(g_pageController.alloc(trampolineSize + 5 * 2), g_pageController.allocNear(m_target, trampolineSize + 14 * 2)); // 14 to be certain for x64 and x86
 #if SAFEHOOK_X64
 				if (!pPage) // allocating near failed, and now we will just try far jmp indirect, FUCK!
 				{
@@ -2330,11 +2673,17 @@ namespace SafeHook
 					pPage = g_pageController.alloc(trampolineSize + 14);
 				}
 #endif
-
+				m_trampolineEntry = (unsigned char *)pPage;
 				if (pPage)
 				{
-					m_trampoline = (unsigned char *)pPage;
-					SafeHook::CreateTrampoline(m_target, m_trampoline, &m_trampolineSize);
+					size_t jmpSize = GetDistanceTypeSize(m_target, (unsigned char *)pPage + trampolineSize) + 1;
+					// should be either 2 bytes or 5, since we have a full 14 bytes for x64 at the end of trampoline
+
+					m_trampoline = (unsigned char *)pPage + jmpSize;
+					SafeHook::CreateTrampoline(m_target, m_trampoline, &m_trampolineSize, jmpSize);
+
+					MakeJMP(m_trampoline + m_trampolineSize, m_hook, false);
+					MakeJMP(m_trampolineEntry, m_trampoline + m_trampolineSize, false);
 
 					m_state.bTrampolineCreated = true;
 				}
@@ -2402,20 +2751,14 @@ namespace SafeHook
 			m_state.bEnabled = true;
 			if (m_state.bTrampolineCreated && !m_state.bTrampolineLinked)
 			{
-				Sync([&]()
+				SyncLock([&](Vector<DWORD> &threadIds)
 				{
-					Vector<DWORD> threadIds;
-					EnumerateThreads(threadIds);
-					
-					SuspendThreads(threadIds);
 					scoped_unprotect unprotect(m_target, m_originalBytes.size);
 
-					MakeJMP(m_target, m_hook, false);
+					MakeJMP(m_target, m_trampolineEntry, false);
 					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
 
-					RedirectThreads(threadIds, m_target, m_originalBytes.size, m_trampoline);
-
-					ResumeThreads(threadIds); 
+					RedirectThreads(threadIds, m_target, m_originalBytes.size, m_trampolineEntry);
 				});
 
 				m_state.bTrampolineLinked = true;
@@ -2427,19 +2770,12 @@ namespace SafeHook
 			m_state.bEnabled = false;
 			if (m_state.bTrampolineCreated && m_state.bTrampolineLinked)
 			{
-				Sync([&]()
+				SyncLock([&](Vector<DWORD> &threadIds)
 				{
-					Vector<DWORD> threadIds;
-					EnumerateThreads(threadIds);
-
-					SuspendThreads(threadIds);
-
 					m_originalBytes.restore(false); // Must ensure that address is valid
 					FlushInstructionCache(GetCurrentProcess(), m_target, m_originalBytes.size);
 
-					RedirectThreads(threadIds, m_trampoline, m_trampolineSize, m_target);
-
-					ResumeThreads(threadIds); 
+					RedirectThreads(threadIds, m_trampolineEntry, m_trampolineSize, m_target);
 				});
 
 				m_state.bTrampolineLinked = false;
@@ -2942,6 +3278,9 @@ namespace SafeHook
 			else
 				return FPUandSSE.FPU.st[i];
 		}
+
+		uintptr_t &return_address() { return *(uintptr_t *)(saved_esp.i32 + 0x8); }
+		void set_return_address(uintptr_t addr) { return_address() = addr; }
 	} CTX;
 #else
 	typedef struct CTX
@@ -2976,6 +3315,9 @@ namespace SafeHook
 			else
 				return FPUandSSE.FPU.st[i];
 		}
+
+		uintptr_t &return_address() { return *(uintptr_t *)(saved_rsp.i64 + 0x10); }
+		void set_return_address(uintptr_t addr) { return_address() = addr; }
 	};
 #endif
 	// @brief Can be used in cave or in mid-function hooking
@@ -3027,6 +3369,24 @@ namespace SafeHook
 		MidAsmHookUnsafe unsafe_hook;
 		unsigned char *trampoline = nullptr;
 		scoped_backup original_bytes;
+		SafeHook::SafeAddress address;
+	public:
+		uintptr_t exit_address = 0;
+	private:
+		struct
+		{
+			union
+			{
+				struct
+				{
+					uint32_t bEnabled : 1;
+					uint32_t bTrampolineCreated : 1;
+					uint32_t bTrampolineLinked : 1;
+					uint32_t bOriginalBytesStored : 1;
+				};
+				uint32_t i32;
+			};
+		};
 
 		// Try to find a place to inject the trampoline
 		// You cannot just put a trampoline in the middle of instruction and expect it to work
@@ -3073,14 +3433,69 @@ namespace SafeHook
 
 			MakeNOP(trampoline, jmpSize, false);
 
-			orig_size = CreateTrampoline((unsigned char *)_address, this->trampoline + jmpSize, nullptr);
+			size_t trampSize = 0;
+			orig_size = CreateTrampoline((unsigned char *)_address, this->trampoline + jmpSize, &trampSize);
+			exit_address = _address + trampSize + jmpSize;
 		}
 
 	public:
 		MidAsmHook() = default;
 
+		void Enable()
+		{
+			if (!address.IsValid())
+				return;
+
+			if (bEnabled || !bTrampolineCreated)
+				return;
+
+			SyncLock([&](Vector<DWORD> &threadIds)
+			{
+				size_t orig_size = original_bytes.size;
+
+				{
+					scoped_unprotect unprotect(address.get(), orig_size);
+
+					memset((void*)address.get(), 0x90, orig_size);
+				}
+
+				MakeJMP(address, trampoline);
+				bTrampolineLinked = true;
+
+				RedirectThreads(threadIds, address.get(), orig_size, trampoline);
+				FlushInstructionCache(GetCurrentProcess(), (void*)address.get(), orig_size);
+			});
+
+			bEnabled = true;
+		}
+
+		void Disable()
+		{
+			if (!address.IsValid())
+				return;
+
+			if (!bEnabled || !bTrampolineCreated)
+				return;
+
+			SyncLock([&](Vector<DWORD> &threadIds)
+			{
+				size_t orig_size = original_bytes.size;
+
+				original_bytes.restore(false);
+				FlushInstructionCache(GetCurrentProcess(), (void*)address.get(), orig_size);
+
+				RedirectThreads(threadIds, trampoline, orig_size, address.get());
+
+				bTrampolineLinked = false;
+			});
+
+			bEnabled = false;
+		}
+
 		MidAsmHook(SafeAddress _address, void(__cdecl *hook_func)(CTX &))
 		{
+			i32 = 0;
+			address = _address;
 			size_t orig_size = 0;
 			try
 			{
@@ -3097,56 +3512,28 @@ namespace SafeHook
 			}
 			SAFEHOOK_CATCH_RET(e);
 			// we need to proceed with the "MidAsmHookUnsafe" before it is connected to the main routine, if we do it after, we might run into unhandled exception
+			bTrampolineCreated = true;
 
-			Sync([&]()
+			if (!bOriginalBytesStored)
 			{
-				Vector<DWORD> threadIds;
-				EnumerateThreads(threadIds);
+				original_bytes.store(_address.get(), orig_size);
+				bOriginalBytesStored = true;
+			}
 
-				SuspendThreads(threadIds);
-
-				{
-					scoped_unprotect unprotect(_address.get(), orig_size);
-					original_bytes.store(_address.get(), orig_size);
-
-					memset((void*)_address.get(), 0x90, orig_size);
-				}
-
-				MakeJMP(_address, trampoline);
-
-				RedirectThreads(threadIds, _address.get(), orig_size, trampoline);
-				FlushInstructionCache(GetCurrentProcess(), (void*)_address.get(), orig_size);
-
-				ResumeThreads(threadIds); 
-			});
+			Enable();
 
 			g_trackHooks = new cTrackHookMidAsmHook(this, g_trackHooks);
 
 			// basically
 			// call hook_wrapper
 			// [original instructions]
+			// exit_address: // you can use it to jump back straight to the original function without executing the original instructions
 			// jmp original_func + original_instructions_size
 		}
 
 		~MidAsmHook()
 		{
-			Sync([&]()
-			{
-				Vector<DWORD> threadIds;
-				EnumerateThreads(threadIds);
-
-				SuspendThreads(threadIds);
-
-				if (unsafe_hook.hook_bytes)
-				{
-					original_bytes.restore(true);
-					FlushInstructionCache(GetCurrentProcess(), (void*)unsafe_hook.cave_address.get(), original_bytes.size);
-				}
-
-				RedirectThreads(threadIds, unsafe_hook.cave_address.get(), original_bytes.size, original_bytes.address);
-
-				ResumeThreads(threadIds); 
-			});
+			Disable();
 
 			g_pageController.release(unsafe_hook.hook_bytes);
 			unsafe_hook.hook_bytes = nullptr; // Do not restore bytes for a wrapper
