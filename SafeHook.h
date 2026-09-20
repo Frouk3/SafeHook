@@ -1621,7 +1621,7 @@ namespace SafeHook
 		}
 		else
 		{
-			func();
+			func(threadIds);
 		}
 	}
 
