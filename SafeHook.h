@@ -1,17 +1,24 @@
 #pragma once
 
+#if !defined(SAFEHOOK_H)
+#define SAFEHOOK_H
+
+#if !defined(__cplusplus) // why should it be included? - I feel like it.
+	#error "SafeHook requires C++ compilation (use a .cpp suffix)"
+#endif
+
 #if defined(_MSC_VER)
-#include <Windows.h>
+	#include <Windows.h>
 #elif defined(__MINGW32__)
-#include <windows.h>
+	#include <windows.h>
 #else
-#error "No support for this one. Targetting Windows only."
+	#error "No support for this one. Targetting Windows only."
 #endif
 
 // Controls exception handling.
 // If you disable exceptions, then you're on your own, and expect the code to crash
 #if !defined(SAFEHOOK_NO_EXCEPTIONS)
-#define SAFEHOOK_NO_EXCEPTIONS 0
+	#define SAFEHOOK_NO_EXCEPTIONS 0
 #endif
 
 #if !defined(SAFEHOOK_TEST)
@@ -19,35 +26,35 @@
 #endif
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
-#define SAFEHOOK_X64 1
-#define SAFEHOOK_X86 0
-#define SAFEHOOK_BY_ARCH(x86, x64) x64
+	#define SAFEHOOK_X64 1
+	#define SAFEHOOK_X86 0
+	#define SAFEHOOK_BY_ARCH(x86, x64) x64
 #else
-#define SAFEHOOK_X86 1
-#define SAFEHOOK_X64 0
-#define SAFEHOOK_BY_ARCH(x86, x64) x86
+	#define SAFEHOOK_X86 1
+	#define SAFEHOOK_X64 0
+	#define SAFEHOOK_BY_ARCH(x86, x64) x86
 #endif
 
 #if defined(_MSC_VER)
-#define SAFEHOOK_FORCEINLINE __forceinline
+	#define SAFEHOOK_FORCEINLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
-#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
+	#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
 #else
-#define SAFEHOOK_FORCEINLINE inline
+	#define SAFEHOOK_FORCEINLINE inline
 #endif
 
 #if defined(_MSC_VER)
-#define ALIGNAS(x) __declspec(align(x))
+	#define ALIGNAS(x) __declspec(align(x))
 #elif defined(__GNUC__) || defined(__clang__)
-#define ALIGNAS(x) __attribute__((aligned(x)))
+	#define ALIGNAS(x) __attribute__((aligned(x)))
 #else
-#define ALIGNAS(x)
+	#define ALIGNAS(x)
 #endif
 
 #if SAFEHOOK_X64
-#include "hde/hde64.h"
+	#include "hde/hde64.h"
 #else
-#include "hde/hde32.h"
+	#include "hde/hde32.h"
 #endif
 
 #include <assert.h>
@@ -61,14 +68,14 @@
 
 #pragma warning(error : 4996) // 'function': was declared deprecated
 
-// All credits for function hooks goes to DarkByte
+// The credit for MidAsmHook hook bytes goes to DarkByte
 
 #if SAFEHOOK_X64
-typedef hde64s hde_s;
-#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
+	typedef hde64s hde_s;
+	#define HDE_DISASM(ptr, disasm) hde64_disasm(ptr, disasm)
 #else
-typedef hde32s hde_s;
-#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
+	typedef hde32s hde_s;
+	#define HDE_DISASM(ptr, disasm) hde32_disasm(ptr, disasm)
 #endif
 
 namespace SafeHook
@@ -396,6 +403,92 @@ namespace SafeHook
 
 	inline bool CheckValidAddress(SafeAddress x);
 
+	template <typename T>
+	class RefPtr
+	{
+		T* m_ptr;
+		unsigned long *m_refCount; // shared object reference count
+	public:
+		RefPtr() : m_ptr(nullptr), m_refCount(nullptr) {}
+		RefPtr(T* ptr) : m_ptr(ptr)
+		{
+			if (ptr)
+			{
+				m_refCount = new unsigned long(1);
+			}
+			else
+			{
+				m_refCount = nullptr;
+			}
+		}
+
+		RefPtr(const RefPtr& other) : m_ptr(other.m_ptr), m_refCount(other.m_refCount)
+		{
+			if (m_refCount)
+			{
+				++(*m_refCount);
+			}
+		}
+
+		RefPtr(RefPtr&& other) noexcept : m_ptr(other.m_ptr), m_refCount(other.m_refCount)
+		{
+			other.m_ptr = nullptr;
+			other.m_refCount = nullptr;
+		}
+
+		~RefPtr()
+		{
+			release();
+		}
+
+		RefPtr& operator=(const RefPtr& other)
+		{
+			if (this != &other)
+			{
+				release();
+				m_ptr = other.m_ptr;
+				m_refCount = other.m_refCount;
+				if (m_refCount)
+				{
+					++(*m_refCount);
+				}
+			}
+			return *this;
+		}
+
+		RefPtr& operator=(RefPtr&& other) noexcept
+		{
+			if (this != &other)
+			{
+				release();
+				m_ptr = other.m_ptr;
+				m_refCount = other.m_refCount;
+				other.m_ptr = nullptr;
+				other.m_refCount = nullptr;
+			}
+			return *this;
+		}
+
+		void release()
+		{
+			if (m_refCount)
+			{
+				if (--(*m_refCount) == 0)
+				{
+					delete m_refCount;
+					m_refCount = nullptr;
+
+					if (m_ptr)
+					{
+						delete m_ptr;
+						m_ptr = nullptr;
+					}
+				}
+			}
+		}
+	};
+
+
 	class SafeAddress
 	{
 		uintptr_t m_address;
@@ -404,6 +497,7 @@ namespace SafeHook
 		constexpr SafeAddress() : m_address(0) {}
 		constexpr SafeAddress(uintptr_t address) : m_address(address) {}
 		constexpr SafeAddress(const void* address) : m_address((uintptr_t)address) {}
+		SafeAddress(const char *address);
 
 		const uintptr_t get() const { return m_address; }
 		void add(size_t offset) { m_address += offset; }
@@ -464,6 +558,7 @@ namespace SafeHook
 		}
 
 		bool IsValid() const { return CheckValidAddress(*this); }
+		RefPtr<const char> to_cstr();
 	};
 
 	inline bool CheckValidAddress(SafeAddress address)
@@ -1025,10 +1120,134 @@ namespace SafeHook
 		size_t distance = to.get() > from.get() ? to.get() - from.get() : from.get() - to.get(); // absolute distance
 		if (distance <= 0x7F)
 			return sizeof(uint8_t);
+		else if (distance <= 0x7FFF)
+			return sizeof(uint16_t);
 		else if (distance <= 0x7FFFFFFF)
 			return sizeof(uint32_t);
 		else
 			return sizeof(uint64_t);
+	}
+
+	inline unsigned int GetJmpInstructionSize(SafeAddress from, SafeAddress to)
+	{
+		size_t size = GetDistanceTypeSize(from, to);
+		switch (size)
+		{
+			case sizeof(uint8_t): // jmp rel8 -> 0xEB ##
+				return 2;
+			case sizeof(uint16_t): // no use for jmp rel16
+			case sizeof(uint32_t): // jmp rel32 -> 0xE9 ## ## ## ##
+				return 5;
+#if SAFEHOOK_X64
+			case sizeof(uint64_t): // jmp [rip+0] -> 0xFF 0x25 00 00 00 00 >> ## ## ## ## ## ## ## ##
+				return 14;
+#else
+			case sizeof(uint64_t): // jmp [eip+0] -> 0xFF 0x25 00 00 00 00 >> ## ## ## ##
+				return 10;
+#endif
+			default:
+				break;
+		}
+
+		return 0;
+	}
+
+	inline const char *GetAddressModuleName(SafeAddress address)
+	{
+		if (!address.IsValid())
+			return "?";
+
+		HMODULE hModule = nullptr;
+		static char moduleName[256] = { 0 };
+		if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)address.get(), &hModule))
+		{
+			sprintf_s(moduleName, sizeof(moduleName), "0x%p", (void*)address.get());
+			return moduleName;
+		}
+
+		if (GetModuleFileNameA(hModule, moduleName, sizeof(moduleName)) == 0)
+			return "?";
+
+		if (char *lastSlash = strrchr(moduleName, '\\'); lastSlash)
+			strcpy_s(moduleName, sizeof(moduleName), lastSlash + 1);
+
+		uintptr_t diff = (uintptr_t)address.get() - (uintptr_t)hModule;
+		if (diff > 0)
+		{
+			sprintf_s(moduleName, sizeof(moduleName), "%s+0x%X", moduleName, diff);
+			return moduleName;
+		}
+
+		return moduleName;
+	}
+
+	// Function that works the same as Cheat Engine's address getter
+	// Behavior as: "moduleName"+offset1+offset2+...+offsetN
+	// TODO: Add support for pointer dereference(e.g. [["moduleName" + offset1] + offset2] + offset3)
+	inline SafeAddress GetAddressByName(const char* strAddress)
+	{
+		if (!strAddress || !*strAddress)
+			return SafeAddress((void*)nullptr);
+
+		char moduleName[256] = { 0 };
+
+		const char *plus = strchr(strAddress, '+');
+		HMODULE hModule = nullptr;
+		if (plus)
+		{
+			strncpy_s(moduleName, strAddress, plus - strAddress);
+			moduleName[plus - strAddress] = '\0';
+
+			if (*moduleName == '\"')
+				memmove(moduleName, moduleName + 1, strlen(moduleName)); // remove the first quote
+
+			if (moduleName[strlen(moduleName) - 1] == '\"')
+				moduleName[strlen(moduleName) - 1] = '\0'; // remove the last quote
+
+			hModule = GetModuleHandleA(moduleName);
+			if (!hModule)
+				return strtoul(strAddress, nullptr, 16); // try it as a number then
+		}
+		else // assuming it's only a module name without an offset
+		{
+			if (*moduleName == '\"')
+				memmove(moduleName, moduleName + 1, strlen(moduleName)); // remove the first quote
+				
+			if (moduleName[strlen(moduleName) - 1] == '\"')
+				moduleName[strlen(moduleName) - 1] = '\0'; // remove the last quote
+
+			hModule = GetModuleHandleA(strAddress);
+			if (!hModule)
+				return strtoul(strAddress, nullptr, 16);
+
+			return SafeAddress((uintptr_t)hModule);
+		}
+	
+		SafeAddress baseAddress((uintptr_t)hModule);
+		for (const char* plus = strchr(strAddress, '+'); plus; plus = strchr(plus + 1, '+'))
+		{
+			char offsetStr[32] = { 0 };
+			strncpy_s(offsetStr, plus + 1, sizeof(offsetStr) - 1);
+			uintptr_t offset = strtoul(offsetStr, nullptr, 16); // Parse the offset as a hexadecimal number
+
+			baseAddress.add((size_t)offset);
+		}
+
+		return baseAddress;
+	}
+
+	SafeAddress::SafeAddress(const char *address)
+	{
+		*this = GetAddressByName(address);
+	}
+
+	inline RefPtr<const char> SafeAddress::to_cstr()
+	{
+		const char *moduleName = GetAddressModuleName(*this);
+		char *buffer = new char[strlen(moduleName) + 1];
+		strcpy_s(buffer, strlen(moduleName) + 1, moduleName);
+
+		return RefPtr((const char*)buffer);
 	}
 
 	class PageController
@@ -1800,17 +2019,17 @@ namespace SafeHook
 
 		if (disasm.flags & F_RELATIVE)
 		{
-			switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
+			switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64))) // Would be converting to signed type, so we can use and fixate on different offsets, e.g. jmp +-rel8, +-rel32, etc.
 			{
 				case F_IMM8:
-					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm8);
+					return (uintptr_t)(address.get() + disasm.len + (char)disasm.imm.imm8);
 				case F_IMM16:
-					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm16);
+					return (uintptr_t)(address.get() + disasm.len + (short)disasm.imm.imm16);
 				case F_IMM32:
-					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm32);
+					return (uintptr_t)(address.get() + disasm.len + (int)disasm.imm.imm32);
 #if SAFEHOOK_X64
 				case F_IMM64:
-					return (uintptr_t)(address.get() + disasm.len + disasm.imm.imm64); // thinking about it, how can we have relative with 8 bytes long pointer?
+					return (uintptr_t)(address.get() + disasm.len + (long long)disasm.imm.imm64); // thinking about it, how can we have relative with 8 bytes long pointer?
 #endif
 				default:
 					break;
@@ -1824,7 +2043,7 @@ namespace SafeHook
 				{
 					case 0x10: // call
 					case 0x20: // jmp
-						return *(uintptr_t*)(address.get() + disasm.len + disasm.imm.imm32);
+						return *(uintptr_t*)(address.get() + disasm.len + (int)disasm.imm.imm32);
 					default:
 						break;
 				}
@@ -1834,14 +2053,14 @@ namespace SafeHook
 				switch (disasm.flags & (F_IMM8 | F_IMM16 | F_IMM32 | SAFEHOOK_BY_ARCH(0, F_IMM64)))
 				{
 					case F_IMM8:
-						return disasm.imm.imm8;
+						return (uintptr_t)(char)disasm.imm.imm8;
 					case F_IMM16:
-						return disasm.imm.imm16;
+						return (uintptr_t)(short)disasm.imm.imm16;
 					case F_IMM32:
-						return disasm.imm.imm32;
+						return (uintptr_t)(int)disasm.imm.imm32;
 #if SAFEHOOK_X64
 					case F_IMM64:
-						return disasm.imm.imm64;
+						return (uintptr_t)(long long)disasm.imm.imm64;
 #endif
 					default:
 						break;
@@ -1877,6 +2096,7 @@ namespace SafeHook
 				WriteMemory<uint8_t>(src + 1, (uint8_t)MakeRelativeOffset(src, dst, 2), false);
 				break;
 			}
+			case sizeof(uint16_t) :
 			case sizeof(uint32_t) :
 			{
 				if (vp)
@@ -1930,6 +2150,7 @@ namespace SafeHook
 		switch (typeSize)
 		{
 			case sizeof(uint8_t) :
+			case sizeof(uint16_t) :
 			case sizeof(uint32_t) :
 			{
 				if (vp)
@@ -2051,6 +2272,18 @@ namespace SafeHook
 				size += 6; // jcc rel8 -> jcc rel32
 #endif
 			}
+			else if (*p >= 0xE0 && *p <= 0xE3)
+			{
+				// assuming that we are going to redirect LOOP
+				size += SAFEHOOK_BY_ARCH(5, 14) + 2 + disasm.len;
+			}
+			else if (*p == 0x66 || *p == 0x67) // operand size override prefix or address size override prefix
+			{
+				if (p[1] >= 0xE0 && p[1] <= 0xE3) // why are you here??, ah, the ECX with CX difference, what a waste of bytes, those who put 0x66 before instruction are wasting bytes, or even adding "padding", whatever.
+				{
+					size += SAFEHOOK_BY_ARCH(5, 14) + 2 + disasm.len;
+				}
+			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
 				size += SAFEHOOK_BY_ARCH(5, *p == 0xE8 ? 16 : 14);
@@ -2096,6 +2329,17 @@ namespace SafeHook
 		return size;
 	}
 
+	// Disassembles the instruction at the given source address and fills the provided hde_s structure with the disassembly information. Returns true if disassembly was successful, false otherwise.
+	// Note: EXCEPTION-FREE, but if the instruction is invalid, it may return false
+	inline bool Disassemble(SafeAddress src, hde_s& disasm)
+	{
+		HDE_DISASM((uint8_t*)src.get(), &disasm);
+		if (disasm.flags & F_ERROR)
+			return false;
+
+		return true;
+	} // Whilst the function is exception-free, it is critical for the whole framework to use exceptions rather than this function
+
 	inline size_t GetByteCodeLength(uint8_t* src, size_t minLength)
 	{
 		hde_s disasm = { 0 };
@@ -2135,29 +2379,7 @@ namespace SafeHook
 		size_t jmpInstruction = 0;
 		if (length == -1)
 		{
-			switch (GetDistanceTypeSize(src, dst))
-			{
-				case sizeof(uint8_t) :
-				{
-					jmpInstruction = 2; // 1 byte for opcode + 1 byte for offset
-					break;
-				}
-				case sizeof(uint32_t) :
-				{
-					jmpInstruction = 5; // 1 byte for opcode + 4 bytes for offset
-					break;
-				}
-#if SAFEHOOK_X64
-				case sizeof(uint64_t) :
-				{
-					jmpInstruction = 14; // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address
-					break;
-				}
-#endif
-				default:
-					// SAFEHOOK_THROW("Invalid distance for trampoline!"); // just don't
-					break;
-			}
+			jmpInstruction = GetJmpInstructionSize(src, dst);
 		}
 		else
 		{
@@ -2174,13 +2396,13 @@ namespace SafeHook
 
 			size_t typeSize = GetDistanceTypeSize(p, dst + writeOffs);
 
-			if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (*(p + 1) >= 0x80 && *(p + 1) <= 0x8F)))
+			if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (p[1] >= 0x80 && p[1] <= 0x8F)))
 			{
 				uintptr_t branchDest = GetBranchDestination(p);
 #if SAFEHOOK_X64
 				if (typeSize == sizeof(uint64_t))
 				{
-					size_t range = GetDistanceTypeSize(q + 2, (uint8_t*)branchDest);
+					size_t range = GetDistanceTypeSize(q + 2, branchDest);
 					size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
 
 					// Invert the condition code so it skips the long jump if FALSE
@@ -2201,17 +2423,50 @@ namespace SafeHook
 					WriteMemory<uint8_t>(q + 1, (uint8_t)jmpSize, false);
 
 					// 2: jmp branchDest -> executes only if original condition was TRUE
-					MakeJMP(q + 2, (uint8_t*)branchDest, false);
+					MakeJMP(q + 2, branchDest, false);
 
 					writeOffs += 2 + jmpSize;
 				}
 #endif
 				WriteMemory<uint8_t>(q, 0x0F, false);
-				WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : *(p + 1), false);
+				WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : p[1], false);
 
 				WriteMemory<uint32_t>(q + 2, (uint32_t)MakeRelativeOffset(q, branchDest, 6), false);
 
 				writeOffs += 6;
+			}
+			else if (*p >= 0xE0 && *p <= 0xE3) // loop, jcxz
+			{
+				uintptr_t branchDest = GetBranchDestination(p); // should be safe to use, since the instruction is relative
+
+				size_t jmpSize = GetJmpInstructionSize(q + disasm.len + 2, branchDest);
+
+				memcpy(q, p, disasm.len); // copy the loop instruction
+
+				*(q + disasm.len - 1) = 2; // skip over short jmp instruction
+
+				MakeJMP(q + disasm.len, q + disasm.len + jmpSize, false);
+				MakeJMP(q + disasm.len + 2, branchDest, false); // go to loop, if the look is taken, offset allows us to do that
+
+				writeOffs += disasm.len + jmpSize + 2;
+			}
+			else if (*p == 0x66 || *p == 0x67)
+			{
+				if (p[1] >= 0xE0 && p[1] <= 0xE3) // jcxz with address size prefix
+				{
+					uintptr_t branchDest = GetBranchDestination(p);
+
+					size_t jmpSize = GetJmpInstructionSize(q + disasm.len + 2, branchDest);
+
+					memcpy(q, p, disasm.len); // copy the loop instruction
+
+					*(q + disasm.len - 1) = 2; // skip over short jmp instruction
+
+					MakeJMP(q + disasm.len, q + disasm.len + 2 + jmpSize, false);
+					MakeJMP(q + disasm.len + 2, branchDest, false); // go to loop, if the look is taken, offset allows us to do that
+
+					writeOffs += disasm.len + jmpSize + 2;
+				}
 			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
@@ -2396,20 +2651,7 @@ namespace SafeHook
 
 		size_t noJumpSize = writeOffs;
 
-		switch (size_t jmpSize = GetDistanceTypeSize(dst + writeOffs, src + readOffs))
-		{
-			case sizeof(uint8_t) :
-				writeOffs += 2; // 1 byte for opcode + 1 byte for offset
-				break;
-			case sizeof(uint32_t) :
-				writeOffs += 5; // 1 byte for opcode + 4 bytes for offset
-				break;
-			case sizeof(uint64_t) :
-				writeOffs += SAFEHOOK_BY_ARCH(14, 10); // 2 bytes for opcode + 4 bytes for offset + 8 bytes for absolute address (x64) or 10 bytes for jmp dword ptr (x86)
-				break;
-			default:
-				break;
-		}
+		writeOffs += GetJmpInstructionSize(dst + writeOffs, src + readOffs);
 
 		if (tramp_size)
 			*tramp_size = writeOffs;
@@ -3213,9 +3455,9 @@ namespace SafeHook
 		double f64[2];
 	} XMMREG;
 
-	struct FPUx87SSE
+	struct ALIGNAS(1) FPUx87SSE // 512 bytes
 	{
-		struct FPUUnit
+		struct ALIGNAS(1) FPUUnit
 		{
 			unsigned short FCW;
 			unsigned short FSW;
@@ -3236,7 +3478,22 @@ namespace SafeHook
 
 			FPUREG st[8];
 
+			const FPUREG& GetLogicalRegister(int idx) const { return st[(GetTop() + idx) & 7]; }
+			FPUREG& GetLogicalRegister(int idx) { return st[(GetTop() + idx) & 7]; }
+
 			int GetTop() const { return (FSW >> 11) & 0x7; }
+			int GetTag(int index) const
+			{
+				if (index < 0 || index > 7)
+					return -1; // invalid index
+
+				return (FTW >> (((GetTop() + index) & 7) * 2)) & 0x3;
+			}
+
+			bool IsValid(int index) const { return GetTag(index) == 0; } // valid
+			bool IsZero(int index) const { return GetTag(index) == 1; } // +0.0, -0.0
+			bool IsSpecial(int index) const { return GetTag(index) == 2; } // NaN, Infinity, Denormal
+			bool IsEmpty(int index) const { return GetTag(index) == 3; } // empty
 		} FPU;
 
 		XMMREG xmm[16];
@@ -3271,11 +3528,11 @@ namespace SafeHook
 			if (i == -1)
 				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
 			else
-				return FPUandSSE.FPU.st[i];
+				return FPUandSSE.FPU.GetLogicalRegister(i);
 		}
 
 		uintptr_t& return_address() { return *(uintptr_t*)(saved_esp.i32 + 0x8); }
-		void set_return_address(uintptr_t addr) { return_address() = addr; }
+		void set_return_address(uintptr_t addr) { return_address() = addr; } // That's unless you want to modify the return address, would not be recommended for functions that have parameters that are saved on the stack
 	} CTX;
 #else
 	typedef struct CTX
@@ -3308,7 +3565,7 @@ namespace SafeHook
 			if (i == -1)
 				return FPUandSSE.FPU.st[FPUandSSE.FPU.GetTop()];
 			else
-				return FPUandSSE.FPU.st[i];
+				return FPUandSSE.FPU.GetLogicalRegister(i);
 		}
 
 		uintptr_t& return_address() { return *(uintptr_t*)(saved_rsp.i64 + 0x10); }
@@ -3413,20 +3670,17 @@ namespace SafeHook
 			}
 			size_t typeSize = GetDistanceTypeSize(trampoline, _address + orignal_size);
 			size_t jmpSize = 0;
-			size_t callSize = 0;
 			switch (typeSize)
 			{
-				case 1:
+				case sizeof(uint8_t):
 					jmpSize = 2;
-					callSize = 5;
 					break;
-				case 4:
+				case sizeof(uint16_t):
+				case sizeof(uint32_t):
 					jmpSize = 5;
-					callSize = 5;
 					break;
-				case 8:
+				case sizeof(uint64_t):
 					jmpSize = SAFEHOOK_BY_ARCH(10, 14);
-					callSize = SAFEHOOK_BY_ARCH(12, 16);
 					break;
 				default:
 					break;
@@ -3568,3 +3822,5 @@ namespace SafeHook
 
 #undef CHECK_ERROR
 }
+
+#endif
