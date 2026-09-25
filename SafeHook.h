@@ -486,6 +486,9 @@ namespace SafeHook
 				}
 			}
 		}
+
+		T* get() const { return m_ptr; }
+		operator T*() const { return m_ptr; }
 	};
 
 
@@ -1821,9 +1824,22 @@ namespace SafeHook
 	SAFEHOOK_FORCEINLINE void Sync(T func)
 	{
 		scoped_slim_lock scopedLock(&g_slimLock);
-		func();
+		
+		try
+		{
+			func();
+		}
+		catch (const SafeHook::Exception& e)
+		{
+			ReportException(e);
+		}
+		catch (...)
+		{
+			SilentReport("Unknown exception occurred in Sync!\n");
+		}
 	}
 
+	// Executes a function while holding a slim lock and suspends all threads besides the main one
 	template <typename T>
 	SAFEHOOK_FORCEINLINE void SyncLock(T func)
 	{
@@ -1832,12 +1848,38 @@ namespace SafeHook
 		if (EnumerateThreads(threadIds))
 		{
 			SuspendThreads(threadIds);
-			func(threadIds);
+			
+			try
+			{
+				func(threadIds);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				ResumeThreads(threadIds);
+				ReportException(e);
+			}
+			catch (...)
+			{
+				ResumeThreads(threadIds);
+				SilentReport("Unknown exception occurred in SyncLock!\n");
+			}
+
 			ResumeThreads(threadIds);
 		}
 		else
 		{
-			func(threadIds);
+			try
+			{
+				func(threadIds);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				ReportException(e);
+			}
+			catch (...)
+			{
+				SilentReport("Unknown exception occurred in SyncLock!\n");
+			}
 		}
 	}
 
@@ -2340,6 +2382,7 @@ namespace SafeHook
 		return true;
 	} // Whilst the function is exception-free, it is critical for the whole framework to use exceptions rather than this function
 
+	// Returns the length of the code, executes until instructions size < minLength
 	inline size_t GetByteCodeLength(uint8_t* src, size_t minLength)
 	{
 		hde_s disasm = { 0 };
@@ -2402,8 +2445,7 @@ namespace SafeHook
 #if SAFEHOOK_X64
 				if (typeSize == sizeof(uint64_t))
 				{
-					size_t range = GetDistanceTypeSize(q + 2, branchDest);
-					size_t jmpSize = (range == sizeof(uint32_t)) ? 5 : 14;
+					size_t jmpSize = GetJmpInstructionSize(q + 2, branchDest);
 
 					// Invert the condition code so it skips the long jump if FALSE
 					uint8_t shortJccOpcode;
@@ -2427,13 +2469,16 @@ namespace SafeHook
 
 					writeOffs += 2 + jmpSize;
 				}
+				else
 #endif
-				WriteMemory<uint8_t>(q, 0x0F, false);
-				WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : p[1], false);
+				{
+					WriteMemory<uint8_t>(q, 0x0F, false);
+					WriteMemory<uint8_t>(q + 1, *p != 0x0F ? *p + 0x10 : p[1], false);
 
-				WriteMemory<uint32_t>(q + 2, (uint32_t)MakeRelativeOffset(q, branchDest, 6), false);
+					WriteMemory<uint32_t>(q + 2, (uint32_t)MakeRelativeOffset(q, branchDest, 6), false);
 
-				writeOffs += 6;
+					writeOffs += 6;
+				}
 			}
 			else if (*p >= 0xE0 && *p <= 0xE3) // loop, jcxz
 			{
@@ -2764,7 +2809,10 @@ namespace SafeHook
 			m_target = (unsigned char*)pTarget;
 			m_hook = (unsigned char*)pHook;
 
-			size_t size = GetByteCodeLength(m_target, coverSize ? coverSize : SAFEHOOK_BY_ARCH(5, 14));
+			if (!coverSize)
+				coverSize = SAFEHOOK_BY_ARCH(5, 14);
+
+			size_t size = GetByteCodeLength(m_target, coverSize);
 			m_originalBytes.store(pTarget, size);
 
 			size_t trampSize = GetTrampolineSize(m_target);
@@ -2822,7 +2870,10 @@ namespace SafeHook
 
 			SyncLock([&](Vector<DWORD>& threadIds)
 			{
+				MakeNOP(m_target, m_coveredSize);
+
 				MakeJMP(m_target, m_trampolineEntry);
+
 				FlushInstructionCache(GetCurrentProcess(), m_target, m_coveredSize);
 
 				RedirectThreads(threadIds, m_target, m_coveredSize, m_trampolineEntry);
@@ -3225,6 +3276,24 @@ namespace SafeHook
 		};
 	};
 #endif
+#if SAFEHOOK_X64
+	// Want to check for specific flags like VM? Use this function.
+	RFLAGS GetFlags()
+	{
+		char fnc[] = { 0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfq; xor rax, rax; mov rax, [rsp]; popfq; ret
+
+		return ((RFLAGS(__fastcall*)())(void*)fnc))();
+	}
+#else
+	// Want to check for specific flags like VM? Use this function.
+	EFLAGS GetFlags()
+	{
+		char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov eax; [esp]; popfd; ret
+
+		return ((EFLAGS(__cdecl*)())(void*)fnc)();
+	}
+#endif
+	// hoping that optimization would work "nicely" and forceinline the bytes
 
 	typedef struct FPUREG
 	{
@@ -3455,9 +3524,9 @@ namespace SafeHook
 		double f64[2];
 	} XMMREG;
 
-	struct ALIGNAS(1) FPUx87SSE // 512 bytes
+	struct FPUx87SSE // 512 bytes
 	{
-		struct ALIGNAS(1) FPUUnit
+		struct FPUUnit
 		{
 			unsigned short FCW;
 			unsigned short FSW;
@@ -3646,45 +3715,29 @@ namespace SafeHook
 			void handleTrampoline(uintptr_t _address, size_t& orig_size),
 			void handleTrampoline(uintptr_t _address, size_t& orig_size, bool bTryAllocNear = true))
 		{
-			size_t orignal_size = GetTrampolineSize(_address);
+			size_t guessedTrampSize = GetTrampolineSize(_address);
 #if SAFEHOOK_X64
 			if (bTryAllocNear)
 			{
-				trampoline = (unsigned char*)g_pageController.allocNear((void*)_address, orignal_size + g_JmpInstructionSize * 2);
+				trampoline = (unsigned char*)g_pageController.allocNear((void*)_address, guessedTrampSize + g_JmpInstructionSize * 2);
 				orig_size = GetByteCodeLength((unsigned char*)_address, 5);
 				if (!trampoline)
 				{
-					trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+					trampoline = (unsigned char*)g_pageController.alloc(guessedTrampSize + g_JmpInstructionSize * 2);
 					orig_size = GetByteCodeLength((unsigned char*)_address, 14);
 				}
 			}
 			else
 #endif
 			{
-				trampoline = (unsigned char*)g_pageController.alloc(orignal_size + g_JmpInstructionSize * 2);
+				trampoline = (unsigned char*)g_pageController.alloc(guessedTrampSize + g_JmpInstructionSize * 2);
 				orig_size = GetByteCodeLength((unsigned char*)_address, 5);
 			}
 			if (!this->trampoline)
 			{
 				SAFEHOOK_THROW_FORMAT("Failed to allocate memory for %p!", (void*)_address);
 			}
-			size_t typeSize = GetDistanceTypeSize(trampoline, _address + orignal_size);
-			size_t jmpSize = 0;
-			switch (typeSize)
-			{
-				case sizeof(uint8_t):
-					jmpSize = 2;
-					break;
-				case sizeof(uint16_t):
-				case sizeof(uint32_t):
-					jmpSize = 5;
-					break;
-				case sizeof(uint64_t):
-					jmpSize = SAFEHOOK_BY_ARCH(10, 14);
-					break;
-				default:
-					break;
-			}
+			size_t jmpSize = GetJmpInstructionSize(trampoline, _address + guessedTrampSize);
 
 			MakeNOP(trampoline, jmpSize, false);
 
