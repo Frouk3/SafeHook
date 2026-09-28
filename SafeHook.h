@@ -2664,9 +2664,6 @@ namespace SafeHook
 			CHECK_ERROR(disasm);
 
 			uint8_t* p = (uint8_t*)src.get() + readOffs;
-			if (*p == 0x66 || *p == 0x67) // operand size override or address size override prefix, skip
-				++p;
-
 			if ((*p >= 0x70 && *p <= 0x7F))
 			{
 #if SAFEHOOK_X64
@@ -2684,6 +2681,13 @@ namespace SafeHook
 			{
 				// assuming that we are going to redirect LOOP
 				size += SAFEHOOK_BY_ARCH(5, 14) + 2 + disasm.len;
+			}
+			else if (*p == 0x66 || *p == 0x67) // operand size override prefix or address size override prefix
+			{
+				if (p[1] >= 0xE0 && p[1] <= 0xE3) // why are you here??, ah, the ECX with CX difference, what a waste of bytes, those who put 0x66 before instruction are wasting bytes, or even adding "padding", whatever.
+				{
+					size += SAFEHOOK_BY_ARCH(5, 14) + 2 + disasm.len;
+				}
 			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
@@ -2799,9 +2803,6 @@ namespace SafeHook
 
 			size_t typeSize = GetDistanceTypeSize(p, dst + writeOffs);
 
-			if (*p == 0x66 || *p == 0x67) // operand size override or address size override prefix, skip
-				++p;
-
 			if ((*p >= 0x70 && *p <= 0x7F) || (*p == 0x0F && (p[1] >= 0x80 && p[1] <= 0x8F)))
 			{
 				uintptr_t branchDest = GetBranchDestination(p);
@@ -2857,6 +2858,24 @@ namespace SafeHook
 				MakeJMP(q + disasm.len + 2, branchDest, false); // go to loop, if the look is taken, offset allows us to do that
 
 				writeOffs += disasm.len + jmpSize + 2;
+			}
+			else if (*p == 0x66 || *p == 0x67)
+			{
+				if (p[1] >= 0xE0 && p[1] <= 0xE3) // jcxz with address size prefix
+				{
+					uintptr_t branchDest = GetBranchDestination(p);
+
+					size_t jmpSize = GetJmpInstructionSize(q + disasm.len + 2, branchDest);
+
+					memcpy(q, p, disasm.len); // copy the loop instruction
+
+					*(q + disasm.len - 1) = 2; // skip over short jmp instruction
+
+					MakeJMP(q + disasm.len, q + disasm.len + 2 + jmpSize, false);
+					MakeJMP(q + disasm.len + 2, branchDest, false); // go to loop, if the look is taken, offset allows us to do that
+
+					writeOffs += disasm.len + jmpSize + 2;
+				}
 			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
 			{
