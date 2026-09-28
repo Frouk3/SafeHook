@@ -37,10 +37,13 @@
 
 #if defined(_MSC_VER)
 	#define SAFEHOOK_FORCEINLINE __forceinline
+	#define SAFEHOOK_NOINLINE __declspec(noinline)
 #elif defined(__GNUC__) || defined(__clang__)
 	#define SAFEHOOK_FORCEINLINE inline __attribute__((always_inline))
+	#define SAFEHOOK_NOINLINE __attribute__((noinline))
 #else
 	#define SAFEHOOK_FORCEINLINE inline
+	#define SAFEHOOK_NOINLINE
 #endif
 
 #if defined(_MSC_VER)
@@ -69,6 +72,8 @@
 #pragma warning(error : 4996) // 'function': was declared deprecated
 
 // The credit for MidAsmHook hook bytes goes to DarkByte
+
+#pragma section(".text", read, data, execute)
 
 #if SAFEHOOK_X64
 	typedef hde64s hde_s;
@@ -160,6 +165,410 @@ namespace SafeHook
 		0xC3									  // ret
 	};
 #endif
+
+	class String
+	{
+		char* m_data;
+		unsigned int m_length : 16;
+		unsigned int m_capacity : 16;
+
+		// using compressed version of length and capacity to have less impact on memory usage, but also limits to the 65535 characters, should be enough
+
+		void freeString()
+		{
+			if (m_data)
+			{
+				delete[] m_data;
+				m_data = nullptr;
+			}
+		}
+
+		void allocateString(size_t capacity)
+		{
+			m_data = new char[capacity];
+			m_capacity = capacity;
+		}
+
+		void reallocateString(size_t newCapacity)
+		{
+			if (newCapacity <= m_capacity)
+				return;
+
+			char* oldData = m_data;
+			allocateString(newCapacity);
+			if (oldData)
+			{
+				memcpy(m_data, oldData, m_length);
+				delete[] oldData;
+			}
+		}
+	public:
+		String() : m_data(nullptr), m_length(0), m_capacity(0) {}
+		String(const char* str) : m_data(nullptr), m_length(0), m_capacity(0)
+		{
+			if (str)
+			{
+				m_length = (unsigned int)strlen(str);
+				reallocateString(m_length + 1);
+				memcpy(m_data, str, m_length);
+				m_data[m_length] = '\0';
+			}
+		}
+
+		String(char f, size_t length) : m_data(nullptr), m_length((unsigned int)length), m_capacity(0)
+		{
+			reallocateString(length + 1);
+			memset(m_data, f, length);
+			m_data[length] = '\0';
+		}
+
+		String(const char* str, size_t length) : m_data(nullptr), m_length((unsigned int)length), m_capacity(0)
+		{
+			reallocateString(length + 1);
+			memcpy(m_data, str, length);
+			m_data[length] = '\0';
+		}
+
+		String(const String& other) : m_data(nullptr), m_length(other.m_length), m_capacity(0)
+		{
+			reallocateString(m_length + 1);
+			memcpy(m_data, other.m_data, m_length);
+			m_data[m_length] = '\0';
+		}
+
+		String(String&& other) noexcept : m_data(other.m_data), m_length(other.m_length), m_capacity(other.m_capacity)
+		{
+			other.m_data = nullptr;
+			other.m_length = 0;
+			other.m_capacity = 0;
+		}
+
+		~String()
+		{
+			freeString();
+			m_length = 0;
+			m_capacity = 0;
+		}
+
+		String& operator=(const char* str)
+		{
+			freeString();
+			m_length = (unsigned int)strlen(str);
+			reallocateString(m_length + 1);
+			memcpy(m_data, str, m_length);
+			m_data[m_length] = '\0';
+			return *this;
+		}
+
+		String& operator=(const String& other)
+		{
+			if (this != &other)
+			{
+				freeString();
+				m_length = other.m_length;
+				reallocateString(m_length + 1);
+				memcpy(m_data, other.m_data, m_length);
+				m_data[m_length] = '\0';
+			}
+			return *this;
+		}
+
+		String& operator=(String&& other) noexcept
+		{
+			if (this != &other)
+			{
+				freeString();
+
+				m_data = other.m_data;
+				m_length = other.m_length;
+				m_capacity = other.m_capacity;
+
+				other.m_data = nullptr;
+				other.m_length = 0;
+				other.m_capacity = 0;
+			}
+			return *this;
+		}
+
+		void append(const char* str, size_t length)
+		{
+			size_t newLength = m_length + length;
+
+			reallocateString(newLength + 1);
+			memcpy(m_data + m_length, str, length);
+
+			m_length = (unsigned int)newLength;
+			m_data[m_length] = '\0';
+		}
+
+		void append(const char* str)
+		{
+			append(str, strlen(str));
+		}
+
+		void append(const String& other)
+		{
+			append(other.m_data, other.m_length);
+		}
+
+		String& operator+=(const char* str)
+		{
+			append(str);
+			return *this;
+		}
+
+		String& operator+=(const String& other)
+		{
+			append(other);
+			return *this;
+		}
+
+		String& operator+=(char c)
+		{
+			append(&c, 1);
+			return *this;
+		}
+
+		String operator+(const char* str) const
+		{
+			String result(*this);
+			result.append(str);
+			return result;
+		}
+
+		String operator+(const String& other) const
+		{
+			String result(*this);
+			result.append(other);
+			return result;
+		}
+		
+		String operator+(char c) const
+		{
+			String result(*this);
+			result.append(&c, 1);
+			return result;
+		}
+
+		String operator/(const char* str) const
+		{
+			String result(*this);
+			result.append("\\"); // Append a backslash before the new string
+			result.append(str);
+			return result;
+		}
+
+		String& operator/=(const char* str)
+		{
+			append("\\"); // Append a backslash before the new string
+			append(str);
+			return *this;
+		}
+
+		const char* c_str() const { return m_data ? m_data : ""; }
+		char* data() { return m_data; }
+		size_t length() const { return m_length; }
+		size_t capacity() const { return m_capacity; }
+		bool empty() const { return m_length == 0; }
+
+		void clear()
+		{
+			freeString();
+			m_length = 0;
+			m_capacity = 0;
+		}
+		
+		void reserve(size_t newCapacity)
+		{
+			if (newCapacity > m_capacity)
+			{
+				reallocateString(newCapacity);
+			}
+		}
+
+		void resize(size_t newLength)
+		{
+			if (newLength > m_capacity)
+			{
+				reallocateString(newLength + 1);
+			}
+			m_length = (unsigned int)newLength;
+			if (m_data)
+				m_data[m_length] = '\0';
+		}
+
+		void shrink_to_fit()
+		{
+			if (m_length < m_capacity)
+			{
+				reallocateString(m_length + 1);
+			}
+		}
+
+		void remove(size_t pos, size_t count)
+		{
+			if (pos >= m_length)
+				return;
+
+			if (pos + count > m_length)
+				count = m_length - pos;
+
+			memmove(m_data + pos, m_data + pos + count, m_length - (pos + count));
+			m_length -= (unsigned int)count;
+			m_data[m_length] = '\0';
+		}
+
+		void insert(size_t pos, const char* str, size_t length)
+		{
+			if (pos > m_length)
+				pos = m_length;
+
+			size_t newLength = m_length + length;
+			reallocateString(newLength + 1);
+
+			memmove(m_data + pos + length, m_data + pos, m_length - pos);
+			memcpy(m_data + pos, str, length);
+
+			m_length = (unsigned int)newLength;
+			m_data[m_length] = '\0';
+		}
+
+		void insert(size_t pos, const char* str)
+		{
+			insert(pos, str, strlen(str));
+		}
+
+		void push_back(char c)
+		{
+			append(&c, 1);
+		}
+
+		void pop_back()
+		{
+			if (m_length > 0)
+			{
+				--m_length;
+				if (m_data)
+					m_data[m_length] = '\0';
+			}
+		}
+
+		void swap(String& other)
+		{
+			std::swap(m_data, other.m_data);
+			unsigned int tempLength = m_length;
+			m_length = other.m_length;
+			other.m_length = tempLength;
+
+			unsigned int tempCapacity = m_capacity;
+			m_capacity = other.m_capacity;
+			other.m_capacity = tempCapacity;
+		}
+
+		// Returns -1 if not found
+		size_t find(const char* str, size_t pos = 0) const
+		{
+			if (pos >= m_length)
+				return -1;
+
+			size_t strLen = strlen(str);
+			size_t len = m_length;
+			
+			for (int i = 0; i < int(len - pos); i++)
+			{
+				if (i >= int((len - pos) - strLen)) // out of bounds
+					return -1;
+
+				bool found = true;
+				if (tolower(str[i]) != tolower(m_data[pos + i]))
+					found = false;
+
+				if (found)
+					return pos + i;
+			}
+
+			return -1;
+		}
+
+		int format(const char* fmt, ...)
+		{
+			va_list args;
+			va_start(args, fmt);
+
+			int result = format(fmt, args);
+
+			va_end(args);
+
+			return result;
+		}
+
+		int format(const char* fmt, va_list args)
+		{
+			int length = _vscprintf(fmt, args) + 1; // +1 for null terminator
+			resize(length);
+
+			return vsnprintf_s(m_data, m_capacity, m_length, fmt, args);
+		}
+
+		void toLower()
+		{
+			for (size_t i = 0; i < m_length; ++i)
+			{
+				m_data[i] = (char)tolower(m_data[i]);
+			}
+		}
+
+		void toUpper()
+		{
+			for (size_t i = 0; i < m_length; ++i)
+			{
+				m_data[i] = (char)toupper(m_data[i]);
+			}
+		}
+
+		String substr(size_t pos, size_t count) const
+		{
+			if (pos >= m_length)
+				return String();
+
+			if (pos + count > m_length)
+				count = m_length - pos;
+
+			return String(m_data + pos, count);
+		}
+
+		String substr(size_t pos) const
+		{
+			if (pos >= m_length)
+				return String();
+
+			return String(m_data + pos, m_length - pos);
+		}
+
+		bool operator==(const String& other) const
+		{
+			if (m_length != other.m_length)
+				return false;
+
+			return _stricmp(m_data, other.m_data) == 0;
+		}
+
+		bool operator==(const char* str) const
+		{
+			return _stricmp(m_data, str) == 0;
+		}
+
+		bool operator!=(const String& other) const
+		{
+			return !(*this == other);
+		}
+
+		bool operator!=(const char* str) const
+		{
+			return !(*this == str);
+		}
+	};
+
 #if SAFEHOOK_NO_EXCEPTIONS
 	class Exception
 	{
@@ -183,60 +592,46 @@ namespace SafeHook
 #else
 	class Exception
 	{
-		char* m_msg;
+		String m_msg;
 		const char* m_file;
 		unsigned int m_line;
 
-		void AllocateString(const char* msg)
-		{
-			size_t len = strlen(msg) + 1;
-			m_msg = new char[len];
-			strcpy_s(m_msg, len, msg);
-		}
-
-		void FreeString()
-		{
-			if (m_msg)
-			{
-				delete[] m_msg;
-				m_msg = nullptr;
-			}
-		}
-
 		void CopyFrom(const Exception& other)
 		{
+			m_msg = other.m_msg;
+			m_file = other.m_file;
 			m_line = other.m_line;
-			AllocateString(other.m_msg);
 		}
 
 		void MoveFrom(Exception&& other) noexcept
 		{
+			m_file = other.m_file;
 			m_line = other.m_line;
-			m_msg = other.m_msg;
-			other.m_msg = nullptr;
+			m_msg = std::move(other.m_msg);
+
+			other.m_file = nullptr;
+			other.m_line = 0;
+			other.m_msg.clear();
 		}
 
 		void MoveFrom(Exception& other) noexcept
 		{
 			m_line = other.m_line;
-			m_msg = other.m_msg;
-			other.m_msg = nullptr;
+			m_msg = std::move(other.m_msg);
+			m_file = other.m_file;
+
+			other.m_line = 0;
+			other.m_msg.clear();
+			other.m_file = nullptr;
 		}
 
 		void FormatMsg(const char* fmt, va_list va)
 		{
-			int length = _vscprintf(fmt, va) + 1;
-			m_msg = new char[length];
-
-			vsnprintf_s(m_msg, length, length - 1, fmt, va);
+			m_msg.format(fmt, va);
 		}
 
 	public:
-		Exception(const char* msg, const char* file, unsigned int line) : m_line(line), m_file(file)
-		{
-			if (msg)
-				AllocateString(msg);
-		}
+		Exception(const char* msg, const char* file, unsigned int line) : m_line(line), m_file(file), m_msg(msg) {}
 
 		Exception(const Exception& other)
 		{
@@ -250,14 +645,14 @@ namespace SafeHook
 
 		~Exception()
 		{
-			FreeString();
+			m_line = 0;
+			m_file = nullptr;
 		}
 
 		Exception& operator=(const Exception& other)
 		{
 			if (this != &other)
 			{
-				FreeString();
 				CopyFrom(other);
 			}
 			return *this;
@@ -267,15 +662,14 @@ namespace SafeHook
 		{
 			if (this != &other)
 			{
-				FreeString();
 				MoveFrom(std::move(other));
 			}
 			return *this;
 		}
 
-		const char* what() const { return m_msg; }
+		const char* what() const { return m_msg.c_str(); }
 		int line() const { return m_line; }
-		const char* file() const { return m_file; }
+		const char* file() const { return m_file ? m_file : ""; }
 
 		static inline char ExceptionBuffer[512];
 
@@ -403,95 +797,6 @@ namespace SafeHook
 
 	inline bool CheckValidAddress(SafeAddress x);
 
-	template <typename T>
-	class RefPtr
-	{
-		T* m_ptr;
-		unsigned long *m_refCount; // shared object reference count
-	public:
-		RefPtr() : m_ptr(nullptr), m_refCount(nullptr) {}
-		RefPtr(T* ptr) : m_ptr(ptr)
-		{
-			if (ptr)
-			{
-				m_refCount = new unsigned long(1);
-			}
-			else
-			{
-				m_refCount = nullptr;
-			}
-		}
-
-		RefPtr(const RefPtr& other) : m_ptr(other.m_ptr), m_refCount(other.m_refCount)
-		{
-			if (m_refCount)
-			{
-				++(*m_refCount);
-			}
-		}
-
-		RefPtr(RefPtr&& other) noexcept : m_ptr(other.m_ptr), m_refCount(other.m_refCount)
-		{
-			other.m_ptr = nullptr;
-			other.m_refCount = nullptr;
-		}
-
-		~RefPtr()
-		{
-			release();
-		}
-
-		RefPtr& operator=(const RefPtr& other)
-		{
-			if (this != &other)
-			{
-				release();
-				m_ptr = other.m_ptr;
-				m_refCount = other.m_refCount;
-				if (m_refCount)
-				{
-					++(*m_refCount);
-				}
-			}
-			return *this;
-		}
-
-		RefPtr& operator=(RefPtr&& other) noexcept
-		{
-			if (this != &other)
-			{
-				release();
-				m_ptr = other.m_ptr;
-				m_refCount = other.m_refCount;
-				other.m_ptr = nullptr;
-				other.m_refCount = nullptr;
-			}
-			return *this;
-		}
-
-		void release()
-		{
-			if (m_refCount)
-			{
-				if (--(*m_refCount) == 0)
-				{
-					delete m_refCount;
-					m_refCount = nullptr;
-
-					if (m_ptr)
-					{
-						delete m_ptr;
-						m_ptr = nullptr;
-					}
-				}
-			}
-		}
-
-		T* get() const { return m_ptr; }
-		operator T*() const { return m_ptr; }
-	};
-
-
 	class SafeAddress
 	{
 		uintptr_t m_address;
@@ -561,7 +866,7 @@ namespace SafeHook
 		}
 
 		bool IsValid() const { return CheckValidAddress(*this); }
-		RefPtr<const char> to_cstr();
+		String to_str();
 	};
 
 	inline bool CheckValidAddress(SafeAddress address)
@@ -789,8 +1094,8 @@ namespace SafeHook
 			m_last = m_data;
 		}
 
-		size_t capacity() const { return m_end - m_data; }
-		size_t size() const { return m_last - m_data; }
+		size_t capacity() const { if (!m_end || !m_data) return 0; return m_end - m_data; }
+		size_t size() const { if (!m_last || !m_data) return 0; return m_last - m_data; }
 		bool empty() const { return size() == 0; }
 
 		void reserve(size_t newCapacity)
@@ -997,7 +1302,7 @@ namespace SafeHook
 
 	inline void SuspendThreads(Vector<DWORD>& threadIds)
 	{
-		for (int i = threadIds.size() - 1; i >= 0; --i)
+		for (int i = (int)threadIds.size() - 1; i >= 0; --i) // reverse iteration to remove elements faster
 		{
 			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
@@ -1020,7 +1325,7 @@ namespace SafeHook
 
 	inline void ResumeThreads(Vector<DWORD>& threadIds)
 	{
-		for (int i = threadIds.size() - 1; i >= 0; --i)
+		for (int i = (int)threadIds.size() - 1; i >= 0; --i)
 		{
 			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, threadId);
@@ -1034,8 +1339,7 @@ namespace SafeHook
 
 	inline void RedirectThreads(const Vector<DWORD>& threadIds, SafeAddress target, size_t size, SafeAddress trampoline)
 	{
-		bool doBreak = false;
-		for (int i = threadIds.size() - 1; i >= 0; --i)
+		for (int i = (int)threadIds.size() - 1; i >= 0; --i)
 		{
 			DWORD threadId = threadIds[i];
 			HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId);
@@ -1155,13 +1459,13 @@ namespace SafeHook
 		return 0;
 	}
 
-	inline const char *GetAddressModuleName(SafeAddress address)
+	inline String GetAddressModuleName(SafeAddress address)
 	{
 		if (!address.IsValid())
 			return "?";
 
 		HMODULE hModule = nullptr;
-		static char moduleName[256] = { 0 };
+		char moduleName[MAX_PATH] = { 0 };
 		if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)address.get(), &hModule))
 		{
 			sprintf_s(moduleName, sizeof(moduleName), "0x%p", (void*)address.get());
@@ -1174,6 +1478,13 @@ namespace SafeHook
 		if (char *lastSlash = strrchr(moduleName, '\\'); lastSlash)
 			strcpy_s(moduleName, sizeof(moduleName), lastSlash + 1);
 
+		if (char* space = strchr(moduleName, ' '); space) // if we have space in a module name, we should be quoting it
+		{
+			memmove(moduleName + 1, moduleName, strlen(moduleName)); // give some space for quotes
+			moduleName[0] = '\"';
+			moduleName[strlen(moduleName)] = '\"';
+		}
+
 		uintptr_t diff = (uintptr_t)address.get() - (uintptr_t)hModule;
 		if (diff > 0)
 		{
@@ -1184,59 +1495,129 @@ namespace SafeHook
 		return moduleName;
 	}
 
+	// Helper to safely read a pointer in the current process space without crashing
+	inline bool SafeReadPointer(uintptr_t address, uintptr_t& outValue)
+	{
+		if (address == 0)
+			return false;
+
+#if defined(_WIN32)
+		__try
+		{
+			outValue = *(const uintptr_t*)address;
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+#else
+		outValue = *(const uintptr_t*)address;
+		return true;
+#endif
+	}
+
 	// Function that works the same as Cheat Engine's address getter
 	// Behavior as: "moduleName"+offset1+offset2+...+offsetN
-	// TODO: Add support for pointer dereference(e.g. [["moduleName" + offset1] + offset2] + offset3)
+	// Supports pointer dereference with brackets: [["moduleName" + offset1] + offset2]+offset3
 	inline SafeAddress GetAddressByName(const char* strAddress)
 	{
 		if (!strAddress || !*strAddress)
 			return SafeAddress((void*)nullptr);
 
-		char moduleName[256] = { 0 };
+		const char* p = strAddress;
 
-		const char *plus = strchr(strAddress, '+');
-		HMODULE hModule = nullptr;
-		if (plus)
+		auto skipWhitespace = [&]()
 		{
-			strncpy_s(moduleName, strAddress, plus - strAddress);
-			moduleName[plus - strAddress] = '\0';
+			while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
+				p++;
+		};
 
-			if (*moduleName == '\"')
-				memmove(moduleName, moduleName + 1, strlen(moduleName)); // remove the first quote
-
-			if (moduleName[strlen(moduleName) - 1] == '\"')
-				moduleName[strlen(moduleName) - 1] = '\0'; // remove the last quote
-
-			hModule = GetModuleHandleA(moduleName);
-			if (!hModule)
-				return strtoul(strAddress, nullptr, 16); // try it as a number then
-		}
-		else // assuming it's only a module name without an offset
+		auto parsePrimary = [&](auto& self) -> uintptr_t
 		{
-			if (*moduleName == '\"')
-				memmove(moduleName, moduleName + 1, strlen(moduleName)); // remove the first quote
-				
-			if (moduleName[strlen(moduleName) - 1] == '\"')
-				moduleName[strlen(moduleName) - 1] = '\0'; // remove the last quote
+			skipWhitespace();
 
-			hModule = GetModuleHandleA(strAddress);
-			if (!hModule)
-				return strtoul(strAddress, nullptr, 16);
+			if (*p == '\0')
+				return 0;
 
-			return SafeAddress((uintptr_t)hModule);
-		}
-	
-		SafeAddress baseAddress((uintptr_t)hModule);
-		for (const char* plus = strchr(strAddress, '+'); plus; plus = strchr(plus + 1, '+'))
+			if (*p == '[')
+			{
+				p++;
+				uintptr_t innerAddress = self(self);
+				skipWhitespace();
+				if (*p == ']')
+					p++;
+
+				uintptr_t dereferencedVal = 0;
+				if (!SafeReadPointer(innerAddress, dereferencedVal))
+					return 0;
+
+				return dereferencedVal;
+			}
+
+			if (*p == '\"' || *p == '\'')
+			{
+				char quoteChar = *p++;
+				const char* start = p;
+				while (*p && *p != quoteChar)
+					p++;
+
+				char moduleName[MAX_PATH] = { 0 };
+				size_t len = p - start;
+				if (len >= MAX_PATH)
+					len = MAX_PATH - 1;
+				strncpy_s(moduleName, start, len);
+
+				if (*p == quoteChar)
+					p++;
+
+				HMODULE hMod = GetModuleHandleA(moduleName);
+				return (uintptr_t)hMod;
+			}
+
+			const char* start = p;
+			while (*p && *p != '+' && *p != '-' && *p != ']' && *p != ' ' && *p != '\t')
+				p++;
+
+			size_t tokenLen = p - start;
+			char token[MAX_PATH] = { 0 };
+			if (tokenLen >= MAX_PATH)
+				tokenLen = MAX_PATH - 1;
+			strncpy_s(token, start, tokenLen);
+
+			HMODULE hMod = GetModuleHandleA(token);
+			if (hMod != nullptr)
+				return (uintptr_t)hMod;
+
+			char* endPtr = nullptr;
+			uintptr_t val = (uintptr_t)strtoull(token, &endPtr, 16);
+			return val;
+		};
+
+		auto evaluateExpr = [&](auto& self) -> uintptr_t
 		{
-			char offsetStr[32] = { 0 };
-			strncpy_s(offsetStr, plus + 1, sizeof(offsetStr) - 1);
-			uintptr_t offset = strtoul(offsetStr, nullptr, 16); // Parse the offset as a hexadecimal number
+			skipWhitespace();
+			uintptr_t result = parsePrimary(self);
 
-			baseAddress.add((size_t)offset);
-		}
+			while (true)
+			{
+				skipWhitespace();
+				if (*p != '+' && *p != '-')
+					break;
 
-		return baseAddress;
+				char op = *p++;
+				uintptr_t operand = parsePrimary(self);
+				if (op == '+')
+					result += operand;
+				else if (op == '-')
+					result -= operand;
+			}
+
+			return result;
+		};
+
+		uintptr_t finalAddress = evaluateExpr(evaluateExpr);
+		return SafeAddress(finalAddress);
 	}
 
 	SafeAddress::SafeAddress(const char *address)
@@ -1244,13 +1625,9 @@ namespace SafeHook
 		*this = GetAddressByName(address);
 	}
 
-	inline RefPtr<const char> SafeAddress::to_cstr()
+	inline String SafeAddress::to_str()
 	{
-		const char *moduleName = GetAddressModuleName(*this);
-		char *buffer = new char[strlen(moduleName) + 1];
-		strcpy_s(buffer, strlen(moduleName) + 1, moduleName);
-
-		return RefPtr((const char*)buffer);
+		return GetAddressModuleName(*this);
 	}
 
 	class PageController
@@ -1755,19 +2132,33 @@ namespace SafeHook
 		{
 			HMODULE hModule = GetModuleHandleA(moduleName);
 			if (!hModule)
-				SAFEHOOK_THROW_FORMAT("Could not get module handle for %s", moduleName);
+			{
+				SilentReport("Could not get handle for module %s, maybe it's not loaded yet?\n", moduleName);
+				return;
+			}
 
 			MEMORY_BASIC_INFORMATION mbi{ 0 };
 			if (!VirtualQuery((LPCVOID)hModule, &mbi, sizeof(mbi)))
-				SAFEHOOK_THROW_FORMAT("Could not query memory information for module %s", moduleName);
+			{
+				SilentReport("Could not query memory information for module %s\n", moduleName);
+				return;
+			}
 
 			if (mbi.State != MEM_COMMIT)
-				SAFEHOOK_THROW_FORMAT("Module %s is not committed in memory!", moduleName);
+			{
+				SilentReport("Module %s is not committed in memory, cannot allocate near it!\n", moduleName);
+				return;
+			}
 
-			if (mbi.RegionSize < PageController::VIRTUAL_PAGE_SIZE)
+			/*
+			if (mbi.RegionSize < PageController::VIRTUAL_PAGE_SIZE) // bruh
 				SAFEHOOK_THROW_FORMAT("Module %s is smaller than the virtual page size!", moduleName);
+			*/
 
-			g_pageController.allocRegionMod((void*)mbi.BaseAddress, PageController::VIRTUAL_PAGE_SIZE);
+			if (!g_pageController.allocRegionMod((void*)mbi.BaseAddress, PageController::VIRTUAL_PAGE_SIZE))
+			{
+				SilentReport("Could not allocate a page near the %s module\n", moduleName);
+			}
 		}
 	};
 #endif
@@ -2148,31 +2539,17 @@ namespace SafeHook
 				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
 				break;
 			}
-#if SAFEHOOK_X64
 			case sizeof(uint64_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 14);
+					x.protect(src.get(), 6 + sizeof(void*));
 
-				WriteMemory<uint16_t>(src, 0x25FF, false); // jmp qword ptr
-				WriteMemory<uint32_t>(src + 2, 0, false);  // [rip+0]
+				WriteMemory<uint16_t>(src, 0x25FF, false); // jmp ?word ptr
+				WriteMemory<uint32_t>(src + 2, 0, false);  // [ip+0]
 
-				WriteMemory<uint64_t>(src + 6, dst.get(), false);
+				WriteMemory<uintptr_t>(src + 6, dst.get(), false);
 				break;
 			}
-#else // upper 2GB bound unlocked by LAA, and in case the dll is loaded in upper 2GB address
-			case sizeof(uint64_t) :
-			{
-				if (vp)
-					x.protect(src.get(), 10); // jmp dword ptr [eip+0] + 4 bytes of pointer
-
-				WriteMemory<uint16_t>(src, 0x25FF, false); // jmp dword ptr
-				WriteMemory<uint32_t>(src + 2, 0, false);  // [eip+0]
-
-				WriteMemory<uint32_t>(src + 6, (uint32_t)dst.get(), false); // pointer
-				break;
-			}
-#endif
 			default:
 				// SAFEHOOK_THROW("Invalid distance for JMP instruction!"); // this should never happen since we check the distance type size beforehand // +: Should we really throw an exception here?
 				break;
@@ -2202,35 +2579,20 @@ namespace SafeHook
 				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
 				break;
 			}
-#if SAFEHOOK_X64
 			case sizeof(uint64_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 16);
+					x.protect(src.get(), 8 + sizeof(void*));
 
-				WriteMemory<uint16_t>(src + 1, 0x15FF, false); // call qword ptr
-				WriteMemory<uint32_t>(src + 2, 2, false);	   // [rip+2]
+				WriteMemory<uint16_t>(src + 1, 0x15FF, false); // call ?word ptr
+				WriteMemory<uint32_t>(src + 2, 2, false);	   // [ip+2]
 
-				WriteMemory<uint16_t>(src + 6, 0x08EB, false); // in case we return after our call we skip the 8 bytes of the pointer -> jmp +8
+				WriteMemory<uint16_t>(src + 6, 0xEB | (sizeof(void*) << 8), false); // skip pointer to continue execution after call
 
-				WriteMemory<uint64_t>(src + 8, dst.get(), false);
+				WriteMemory<uintptr_t>(src + 8, dst.get(), false);
 
 				break;
 			}
-#else // LAA, or loaded in upper 2GB bound
-			case sizeof(uint64_t) :
-			{
-				if (vp)
-					x.protect(src.get(), 12); // call dword ptr [eip+0] + 4 bytes of pointer + 2 for jmp +4
-
-				WriteMemory<uint16_t>(src, 0x15FF, false); // call dword ptr
-				WriteMemory<uint32_t>(src + 2, 0, false);  // [eip+0]
-
-				WriteMemory<uint16_t>(src + 6, 0x04EB, false);				// in case we return after our call we skip the 4 bytes of the pointer -> jmp +4
-				WriteMemory<uint32_t>(src + 8, (uint32_t)dst.get(), false); // pointer
-				break;
-			}
-#endif
 			default:
 				// SAFEHOOK_THROW("Invalid distance for CALL instruction!"); // +: Should we really throw an exception here?
 				break;
@@ -2239,19 +2601,20 @@ namespace SafeHook
 		return prev;
 	}
 
-	// Makes NOPs (no-operation instructions) in the specified memory region. The size parameter specifies how many bytes to fill with NOPs. If vp is true, it temporarily unprotects the memory region to allow writing.
+	// Makes NOPs (no-operation instructions) in the specified memory region. The size parameter specifies how many bytes to fill with NOPs.
 	SAFEHOOK_FORCEINLINE void MakeNOP(SafeAddress address, size_t size, bool vp = true)
 	{
 		MemoryFill(address, 0x90, size, vp);
 	}
 
-	// Makes NOPs (no-operation instructions) in the memory region from src to dst. The size of the region is calculated as dst - src. If vp is true, it temporarily unprotects the memory region to allow writing.
+	// Makes NOPs (no-operation instructions) in the memory region from src to dst. The size of the region is calculated as dst - src.
 	SAFEHOOK_FORCEINLINE void MakeRangedNOP(SafeAddress src, SafeAddress dst, bool vp = true)
 	{
 		MakeNOP(src, dst - src, vp);
 	}
 
-	// Makes a RET (return) instruction at the specified address. If pop is greater than 0, it will also pop the specified number of bytes from the stack before returning. If vp is true, it temporarily unprotects the memory region to allow writing.
+	// Makes a RET (return) instruction at the specified address.
+	// If pop is specified, it will pop the specified number of bytes
 	SAFEHOOK_FORCEINLINE void MakeRET(SafeAddress address, int pop = 0)
 	{
 		scoped_unprotect unprotect(address.get(), 1 + (pop ? 2 : 0));
@@ -2373,6 +2736,7 @@ namespace SafeHook
 
 	// Disassembles the instruction at the given source address and fills the provided hde_s structure with the disassembly information. Returns true if disassembly was successful, false otherwise.
 	// Note: EXCEPTION-FREE, but if the instruction is invalid, it may return false
+	// Be aware that it is disassembled by HDE, may not be perfect for mutilations of call/jmp dword ptr [eip+2 ?? 0] due to data being stored in the instruction, or other instructions that have data in them
 	inline bool Disassemble(SafeAddress src, hde_s& disasm)
 	{
 		HDE_DISASM((uint8_t*)src.get(), &disasm);
@@ -3278,19 +3642,33 @@ namespace SafeHook
 #endif
 #if SAFEHOOK_X64
 	// Want to check for specific flags like VM? Use this function.
-	RFLAGS GetFlags()
+	SAFEHOOK_FORCEINLINE RFLAGS GetFlags()
 	{
-		char fnc[] = { 0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfq; xor rax, rax; mov rax, [rsp]; popfq; ret
+		__declspec(allocate(".text")) static char fnc[] = {0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8}; // pushfq; xor rax, rax; mov rax, [rsp]; popfq; ret
 
 		return ((RFLAGS(__fastcall*)())(void*)fnc))();
 	}
+
+	SAFEHOOK_FORCEINLINE void SetFlags(RFLAGS flags)
+	{
+		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfq; xor rax, rax; mov [rsp], rcx; popfq; ret
+
+		return ((void(__fastcall*)(unsigned long long))(void*)fnc)(flags.i64);
+	}
 #else
 	// Want to check for specific flags like VM? Use this function.
-	EFLAGS GetFlags()
+	SAFEHOOK_FORCEINLINE EFLAGS GetFlags()
 	{
-		char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov eax; [esp]; popfd; ret
+		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov eax, [esp]; popfd; ret
 
 		return ((EFLAGS(__cdecl*)())(void*)fnc)();
+	}
+
+	SAFEHOOK_FORCEINLINE void SetFlags(EFLAGS flags)
+	{
+		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov [esp], ecx; popfd; ret
+
+		return ((void(__fastcall*)(int))(void*)fnc)(flags.i32);
 	}
 #endif
 	// hoping that optimization would work "nicely" and forceinline the bytes
