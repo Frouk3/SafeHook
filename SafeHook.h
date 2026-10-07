@@ -3352,6 +3352,13 @@ namespace SafeHook
 			};
 		};
 	public:
+		InlineHook()
+		{
+			i32 = 0;
+			m_target = m_hook = m_trampoline = m_trampolineEntry = m_exit = nullptr;
+			m_coveredSize = 0;
+		}
+
 		InlineHook(void* pTarget, void* pHook, size_t coverSize = 0)
 		{
 			if (!pTarget || !pHook)
