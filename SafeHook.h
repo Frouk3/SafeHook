@@ -3,7 +3,7 @@
 #if !defined(SAFEHOOK_H)
 #define SAFEHOOK_H
 
-#if !defined(__cplusplus) // why should it be included? - I feel like it.
+#if !defined(__cplusplus) // it has no sense to include this as primarily it is C++
 	#error "SafeHook requires C++ compilation (use a .cpp suffix)"
 #endif
 
@@ -68,6 +68,8 @@
 #include <processthreadsapi.h>
 #include <TlHelp32.h>
 #include <initializer_list>
+#include <share.h>
+#include <immintrin.h>
 
 #pragma warning(error : 4996) // 'function': was declared deprecated
 
@@ -504,7 +506,7 @@ namespace SafeHook
 
 		int format(const char* fmt, va_list args)
 		{
-			int length = _vscprintf(fmt, args) + 1; // +1 for null terminator
+			int length = _vscprintf(fmt, args); // +1 for null terminator
 			resize(length);
 
 			return vsnprintf_s(m_data, m_capacity, m_length, fmt, args);
@@ -1108,8 +1110,6 @@ namespace SafeHook
 		{
 			if (newSize > capacity())
 				reallocate(newSize);
-			if (newSize > size())
-				m_last = m_data + newSize; // Increase size without constructing new elements
 			else if (newSize < size())
 				DestructElems(m_data + newSize, m_last);
 
@@ -1266,6 +1266,9 @@ namespace SafeHook
 
 		T& operator[](size_t index) { return m_data[index]; }
 		const T& operator[](size_t index) const { return m_data[index]; }
+
+		T* data() { return m_data; }
+		const T* data() const { return m_data; }
 	};
 
 	inline bool EnumerateThreads(Vector<DWORD>& threadIds)
@@ -1462,7 +1465,7 @@ namespace SafeHook
 	inline String GetAddressModuleName(SafeAddress address)
 	{
 		if (!address.IsValid())
-			return "?";
+			return String('?', sizeof(void*) * 2);
 
 		HMODULE hModule = nullptr;
 		char moduleName[MAX_PATH] = { 0 };
@@ -1473,7 +1476,7 @@ namespace SafeHook
 		}
 
 		if (GetModuleFileNameA(hModule, moduleName, sizeof(moduleName)) == 0)
-			return "?";
+			return String('?', sizeof(void*) * 2);
 
 		if (char *lastSlash = strrchr(moduleName, '\\'); lastSlash)
 			strcpy_s(moduleName, sizeof(moduleName), lastSlash + 1);
@@ -1620,7 +1623,7 @@ namespace SafeHook
 		return SafeAddress(finalAddress);
 	}
 
-	SafeAddress::SafeAddress(const char *address)
+	inline SafeAddress::SafeAddress(const char *address)
 	{
 		*this = GetAddressByName(address);
 	}
@@ -2168,11 +2171,10 @@ namespace SafeHook
 		SafeAddress address;
 		size_t size;
 		DWORD old_protect;
-
 	public:
 		scoped_unprotect() : old_protect(0), address(uintptr_t(0)), size(0) {}
 
-		void protect(SafeAddress address, size_t size)
+		void unprotect(SafeAddress address, size_t size)
 		{
 			if (!address.get() || !size)
 			{
@@ -2190,7 +2192,7 @@ namespace SafeHook
 			VirtualProtect((LPVOID)address.get(), size, PAGE_EXECUTE_READWRITE, &old_protect);
 		}
 
-		void unprotect()
+		void reprotect()
 		{
 			if (this->address.get() && this->size)
 				VirtualProtect((LPVOID)this->address.get(), this->size, old_protect, &old_protect);
@@ -2201,12 +2203,12 @@ namespace SafeHook
 
 		scoped_unprotect(SafeAddress address, size_t size)
 		{
-			protect(address, size);
+			unprotect(address, size);
 		}
 
 		~scoped_unprotect()
 		{
-			unprotect();
+			reprotect();
 		}
 	};
 
@@ -2510,6 +2512,186 @@ namespace SafeHook
 		return (uintptr_t)(dst.get() - (src.get() + instructionSize));
 	}
 
+	struct PatchDifference // Used to check the the DLL's or EXE's patched bytes
+	{
+		SafeAddress m_address;
+		Vector<unsigned char> m_originalBytes;
+		Vector<unsigned char> m_modifiedBytes;
+
+		PatchDifference() : m_address(uintptr_t(0)) {}
+
+		PatchDifference(SafeAddress address, const Vector<unsigned char>& originalBytes, const Vector<unsigned char>& modifiedBytes)
+			: m_address(address), m_originalBytes(originalBytes), m_modifiedBytes(modifiedBytes) {}
+
+		void restore()
+		{
+			if (m_address.IsValid() && !m_originalBytes.empty())
+				WriteMemoryRaw(m_address, m_originalBytes.data(), m_originalBytes.size());
+		}
+	};
+
+	// Use a thread to check for the difference wtihout freezing the main thread
+	// In development, this function flags any mov reg, imm instructions as modified, which flags it undone
+	// It is also to be known that this issue persists on applications that have dynamic base addresses
+	inline Vector<PatchDifference> InvokePatchDiff(const char *moduleName, bool *done = nullptr)
+	{
+		Vector<PatchDifference> differences;
+
+		auto finish = [&](const Vector<PatchDifference>& diffs)
+		{
+			if (done) *done = true;
+			return diffs;
+		};
+
+		HMODULE hModule = GetModuleHandleA(moduleName);
+		if (!hModule) return finish(differences);
+
+		MODULEINFO moduleInfo;
+		if (!GetModuleInformation(GetCurrentProcess(), hModule, &moduleInfo, sizeof(moduleInfo)))
+			return finish(differences);
+
+		char moduleNameBuffer[MAX_PATH] = { 0 };
+		if (!GetModuleFileNameA(hModule, moduleNameBuffer, sizeof(moduleNameBuffer)))
+			return finish(differences);
+
+		Vector<unsigned char> diskBuffer;
+		FILE* file = _fsopen(moduleNameBuffer, "rb", _SH_DENYNO);
+		if (file)
+		{
+			fseek(file, 0, SEEK_END);
+			long fileSize = ftell(file);
+			fseek(file, 0, SEEK_SET);
+
+			if (fileSize > 0)
+			{
+				diskBuffer.resize(fileSize);
+				size_t bytesRead = fread(diskBuffer.data(), 1, fileSize, file);
+				if (bytesRead != (size_t)fileSize)
+					diskBuffer.clear();
+			}
+			fclose(file);
+		}
+
+		if (diskBuffer.empty()) return finish(differences);
+
+		auto* dosHeader = (IMAGE_DOS_HEADER*)diskBuffer.data();
+		if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE ||
+			dosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS) > diskBuffer.size())
+			return finish(differences);
+
+		auto* ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS*>(diskBuffer.data() + dosHeader->e_lfanew);
+		if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+			return finish(differences);
+
+		uintptr_t memBase = reinterpret_cast<uintptr_t>(moduleInfo.lpBaseOfDll);
+		auto* sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+
+		int cpuInfo[4] = { 0 };
+		__cpuidex(cpuInfo, 1, 0);
+		
+		bool osxsave = cpuInfo[2] & (1 << 27);
+		bool avxSupport = (cpuInfo[2] & (1 << 28));
+
+		bool ymmSave = false;
+
+		if (osxsave && avxSupport)
+		{
+			unsigned long long xcrFeatureMask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+			ymmSave = (xcrFeatureMask & 0x6) == 0x6;
+		}
+
+		bool useAVX = osxsave && avxSupport && ymmSave;
+
+		for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
+		{
+			const IMAGE_SECTION_HEADER& sec = sectionHeaders[i];
+
+			bool isCode = (sec.Characteristics & IMAGE_SCN_MEM_EXECUTE) || (sec.Characteristics & IMAGE_SCN_CNT_CODE);
+			bool isWritable = (sec.Characteristics & IMAGE_SCN_MEM_WRITE);
+
+			if (!isCode || isWritable)
+				continue;
+
+			size_t compareSize = sec.SizeOfRawData > sec.Misc.VirtualSize ? sec.Misc.VirtualSize : sec.SizeOfRawData;
+			if (compareSize == 0)
+				continue;
+
+			if (sec.PointerToRawData + compareSize > diskBuffer.size())
+				continue;
+
+			const unsigned char* diskSec = diskBuffer.data() + sec.PointerToRawData;
+			const unsigned char* memSec = (const unsigned char*)(memBase + sec.VirtualAddress);
+
+			size_t offset = 0;
+
+			while (offset < compareSize)
+			{
+				if (useAVX)
+				{
+					while (offset + sizeof(__m256i) <= compareSize)
+					{
+						__m256i orig = _mm256_loadu_si256((__m256i*)(diskSec + offset));
+						__m256i mod = _mm256_loadu_si256((__m256i*)(memSec + offset));
+						__m256i diff = _mm256_xor_si256(orig, mod);
+
+						if (!_mm256_testz_si256(diff, diff))
+							break;
+
+						offset += sizeof(__m256i);
+					}
+				}
+				else
+				{
+					while (offset + sizeof(__m128i) <= compareSize)
+					{
+						__m128i orig = _mm_loadu_si128((__m128i*)(diskSec + offset));
+						__m128i mod = _mm_loadu_si128((__m128i*)(memSec + offset));
+						__m128i diff = _mm_xor_si128(orig, mod);
+
+						if (!_mm_testz_si128(diff, diff))
+							break;
+
+						offset += sizeof(__m128i);
+					}
+				}
+
+				while (offset < compareSize && diskSec[offset] == memSec[offset])
+				{
+					++offset;
+				}
+
+				if (offset >= compareSize)
+					break;
+
+				size_t patchStart = offset;
+
+				while (offset < compareSize && diskSec[offset] != memSec[offset])
+				{
+					++offset;
+				}
+
+				size_t patchLength = offset - patchStart;
+
+				Vector<unsigned char> original;
+				Vector<unsigned char> modified;
+
+				original.resize(patchLength);
+				modified.resize(patchLength);
+
+				memcpy(original.data(), diskSec + patchStart, patchLength);
+				memcpy(modified.data(), memSec + patchStart, patchLength);
+
+				differences.push_back({
+					SafeAddress((uintptr_t)(memSec + patchStart)),
+					original,
+					modified
+				});
+			}
+		}
+
+		return finish(differences);
+	}
+
 	// Make a jump in the source address to the destination address. Returns the previous destination of the jump.
 	inline uintptr_t MakeJMP(SafeAddress src, SafeAddress dst, bool vp = true)
 	{
@@ -2523,7 +2705,7 @@ namespace SafeHook
 			case sizeof(uint8_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 2);
+					x.unprotect(src.get(), 2);
 
 				WriteMemory<uint8_t>(src, 0xEB, false);
 				WriteMemory<uint8_t>(src + 1, (uint8_t)MakeRelativeOffset(src, dst, 2), false);
@@ -2533,7 +2715,7 @@ namespace SafeHook
 			case sizeof(uint32_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 5);
+					x.unprotect(src.get(), 5);
 
 				WriteMemory<uint8_t>(src, 0xE9, false);
 				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
@@ -2542,7 +2724,7 @@ namespace SafeHook
 			case sizeof(uint64_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 6 + sizeof(void*));
+					x.unprotect(src.get(), 6 + sizeof(void*));
 
 				WriteMemory<uint16_t>(src, 0x25FF, false); // jmp ?word ptr
 				WriteMemory<uint32_t>(src + 2, 0, false);  // [ip+0]
@@ -2573,7 +2755,7 @@ namespace SafeHook
 			case sizeof(uint32_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 5);
+					x.unprotect(src.get(), 5);
 
 				WriteMemory<uint8_t>(src, 0xE8, false);
 				WriteMemory<uint32_t>(src + 1, (uint32_t)MakeRelativeOffset(src, dst, 5), false);
@@ -2582,7 +2764,7 @@ namespace SafeHook
 			case sizeof(uint64_t) :
 			{
 				if (vp)
-					x.protect(src.get(), 8 + sizeof(void*));
+					x.unprotect(src.get(), 8 + sizeof(void*));
 
 				WriteMemory<uint16_t>(src + 1, 0x15FF, false); // call ?word ptr
 				WriteMemory<uint32_t>(src + 2, 2, false);	   // [ip+2]
@@ -2770,7 +2952,7 @@ namespace SafeHook
 	[[deprecated("No support for passing nullptr into dst parameter!")]]
 	inline size_t CreateTrampoline(uint8_t*, std::nullptr_t, size_t* = nullptr, size_t = -1);
 	// Used to make a trampoline in dst, does not write into src
-	// Returns the size of the trampoline, tramp_size is size of the trampoline including the jump instruction at the end to continue original code
+	// Returns the size of the trampoline without jump redirection, tramp_size is size of the trampoline including the jump instruction at the end to continue original code
 	inline size_t CreateTrampoline(uint8_t* src, uint8_t* dst, size_t* tramp_size = nullptr, size_t length = -1)
 	{
 		hde_s disasm = { 0 };
@@ -2875,6 +3057,11 @@ namespace SafeHook
 					MakeJMP(q + disasm.len + 2, branchDest, false); // go to loop, if the look is taken, offset allows us to do that
 
 					writeOffs += disasm.len + jmpSize + 2;
+				}
+				else
+				{
+					memcpy(dst + writeOffs, src + readOffs, disasm.len);
+					writeOffs += disasm.len;
 				}
 			}
 			else if (*p == 0xE9 || *p == 0xE8 || *p == 0xEB) // jmp or call or jmp short
@@ -3197,9 +3384,11 @@ namespace SafeHook
 			else
 				m_coveredSize = size;
 
+			size_t noJmpSize = 0;
+
 			try
 			{
-				CreateTrampoline(m_target, m_trampoline, &trampSize, coverSize ? coverSize : -1);
+				noJmpSize = CreateTrampoline(m_target, m_trampoline, &trampSize, coverSize ? coverSize : -1);
 
 				m_trampolineEntry = m_trampoline + trampSize;
 				MakeJMP(m_trampolineEntry, m_hook, false);
@@ -3217,7 +3406,7 @@ namespace SafeHook
 			}
 			bTrampolineCreated = true;
 
-			m_exit = m_trampoline + trampSize;
+			m_exit = m_trampoline + noJmpSize; // now should be directing right into jmp retAddress
 
 			g_trackHooks = new cTrackHookInlineHook(this, g_trackHooks);
 
@@ -3641,7 +3830,6 @@ namespace SafeHook
 	};
 #endif
 #if SAFEHOOK_X64
-	// Want to check for specific flags like VM? Use this function.
 	SAFEHOOK_FORCEINLINE RFLAGS GetFlags()
 	{
 		__declspec(allocate(".text")) static char fnc[] = {0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8}; // pushfq; xor rax, rax; mov rax, [rsp]; popfq; ret
@@ -3656,7 +3844,6 @@ namespace SafeHook
 		return ((void(__fastcall*)(unsigned long long))(void*)fnc)(flags.i64);
 	}
 #else
-	// Want to check for specific flags like VM? Use this function.
 	SAFEHOOK_FORCEINLINE EFLAGS GetFlags()
 	{
 		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov eax, [esp]; popfd; ret
@@ -3671,8 +3858,6 @@ namespace SafeHook
 		return ((void(__fastcall*)(int))(void*)fnc)(flags.i32);
 	}
 #endif
-	// hoping that optimization would work "nicely" and forceinline the bytes
-
 	typedef struct FPUREG
 	{
 	private: // we shouldn't be really exposed to "internals" so let's just hide it and provide a way to convert to/from double, which is what most people would want to use
