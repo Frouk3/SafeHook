@@ -3327,15 +3327,26 @@ namespace SafeHook
 		}
 	}
 
+	// InlineHook class is used to create a specific type of hooks(code cave, written in assembly), usually is written in assembly to modify registers, stack and or to call a function
+	// Lighter than MidAsmHook, less flexible, but faster and easier to use
 	class InlineHook
 	{
-
 		uint8_t* m_target;
 		uint8_t* m_hook;
+
+		// The structure of a trampoline(explained in Auto Assembler scripting):
+		// memHook: 
+		// original code (copied from target)
+		// jmp exit
+		// trampolineEntry:
+		// jmp hook
+		// target:
+		// jmp trampolineEntry
+		// exit:
 	public:
-		uint8_t* m_trampoline;
-		uint8_t* m_trampolineEntry; // entry point for the code redirection
-		uint8_t* m_exit; // exit point for the trampoline, in case you want to return to the original function without executing the instructions that were overwritten by the hook
+		uint8_t* m_trampoline;		// -> original code, use if you don't include the original code in the hook itself, or if you want to continue execution to the original code
+		uint8_t* m_trampolineEntry; // -> your hook, points to the jmp to your hook
+		uint8_t* m_exit;			// -> points to the jmp at the end of trampoline, use to exit the hook without executing the code that was overwritten by a jmp instruction
 	private:
 		scoped_backup m_originalBytes;
 		size_t m_coveredSize;
@@ -3359,7 +3370,7 @@ namespace SafeHook
 			m_coveredSize = 0;
 		}
 
-		InlineHook(void* pTarget, void* pHook, size_t coverSize = 0)
+		void Create(void *pTarget, void *pHook, bool activate = true, size_t coverSize = 0)
 		{
 			if (!pTarget || !pHook)
 				SAFEHOOK_THROW("Target and hook addresses cannot be null!");
@@ -3417,7 +3428,25 @@ namespace SafeHook
 
 			g_trackHooks = new cTrackHookInlineHook(this, g_trackHooks);
 
-			Enable();
+			if (activate)
+				Enable();
+		}
+
+		InlineHook(void* pTarget, void* pHook, size_t coverSize = 0)
+		{
+			try
+			{
+				Create(pTarget, pHook, true, coverSize);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create inline hook! Reason below:\n");
+				SafeHook::ReportException(e);
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create inline hook! Reason unknown.\n");
+			}
 		}
 
 		void Enable()
@@ -3481,6 +3510,8 @@ namespace SafeHook
 		}
 	};
 
+	// Hook class is used to create a hook that redirects the execution flow from a target function to a hook function, while also providing a possibility to call the original function
+	// Easy to use, but less flexible, serves as a simple redirector
 	class Hook
 	{
 		uint8_t* m_target;
@@ -3549,7 +3580,7 @@ namespace SafeHook
 			m_trampolineSize = m_state.i32 = 0;
 		}
 
-		Hook(void* pTarget, void* pHook, bool bEnable = true, void** pOriginal = nullptr)
+		void Create(void* pTarget, void* pHook, bool bEnable = true, void** pOriginal = nullptr)
 		{
 			try
 			{
@@ -3568,10 +3599,18 @@ namespace SafeHook
 
 				g_trackHooks = new cTrackHookHook(this, g_trackHooks);
 			}
-			SAFEHOOK_CATCH(e);
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason below:\n");
+				SafeHook::ReportException(e);
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason unknown.\n");
+			}
 		}
 
-		Hook(void* pTarget, void* pHook, void** pOriginal)
+		void Create(void* pTarget, void* pHook, void** pOriginal)
 		{
 			try
 			{
@@ -3588,7 +3627,49 @@ namespace SafeHook
 
 				g_trackHooks = new cTrackHookHook(this, g_trackHooks);
 			}
-			SAFEHOOK_CATCH(e);
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason below:\n");
+				SafeHook::ReportException(e);
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason unknown.\n");
+			}
+		}
+
+		Hook(void* pTarget, void* pHook, bool bEnable = true, void** pOriginal = nullptr)
+		{
+			try 
+			{
+				Create(pTarget, pHook, bEnable, pOriginal);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason below:\n");
+				SafeHook::ReportException(e);
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason unknown.\n");
+			}
+		}
+
+		Hook(void* pTarget, void* pHook, void** pOriginal)
+		{
+			try
+			{
+				Create(pTarget, pHook, true, pOriginal);
+			}
+			catch (const SafeHook::Exception& e)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason below:\n");
+				SafeHook::ReportException(e);
+			}
+			catch (...)
+			{
+				SafeHook::SilentReport("Failed to create hook! Reason unknown.\n");
+			}
 		}
 
 		bool valid() const { return CheckValidAddress(m_target) && m_hook && m_state.bTrampolineCreated; }
@@ -3630,6 +3711,7 @@ namespace SafeHook
 			}
 		}
 
+		// needs to be handled with try/catch block
 		void SafeEnable()
 		{
 			if (!valid())
@@ -3638,6 +3720,7 @@ namespace SafeHook
 			Enable();
 		}
 
+		// needs to be handled with try/catch block
 		void SafeDisable()
 		{
 			if (!valid())
@@ -4211,8 +4294,8 @@ namespace SafeHook
 		void set_return_address(uintptr_t addr) { return_address() = addr; }
 	};
 #endif
-	// @brief Can be used in cave or in mid-function hooking
-	// @brief If you can place it in instead of the opcode with 5 bytes length you won't need to use MidAsmHook(which uses trampoline for safety)
+	// Can be used in cave or in mid-function hooking
+	// If you can place it in instead of the opcode with 5 bytes length you won't need to use MidAsmHook(which uses trampoline for safety)
 	class MidAsmHookUnsafe
 	{
 	private:
@@ -4253,7 +4336,8 @@ namespace SafeHook
 		friend class MidAsmHook;
 	};
 
-	// @brief Safer version, but actually a simple wrapper
+	// MidAsmHook is a safer version of MidAsmHookUnsafe with a difference of using a trampoline to continue execution flow of the original code after the hook function is executed
+	// Easy to use, flexible, but slower because all registers are preserved along with FPU and SSE registers
 	class MidAsmHook
 	{
 	private:
