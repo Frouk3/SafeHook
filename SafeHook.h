@@ -75,7 +75,7 @@
 
 // The credit for MidAsmHook hook bytes goes to DarkByte
 
-#pragma section(".text", read, data, execute)
+#pragma section(".text")
 
 #if SAFEHOOK_X64
 	typedef hde64s hde_s;
