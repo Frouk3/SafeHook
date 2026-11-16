@@ -70,6 +70,7 @@
 #include <initializer_list>
 #include <share.h>
 #include <immintrin.h>
+#include <isa_availability.h>
 
 #pragma warning(error : 4996) // 'function': was declared deprecated
 
@@ -2248,12 +2249,10 @@ namespace SafeHook
 			}
 			catch (const SafeHook::Exception& e)
 			{
-				ResumeThreads(threadIds);
 				ReportException(e);
 			}
 			catch (...)
 			{
-				ResumeThreads(threadIds);
 				SilentReport("Unknown exception occurred in SyncLock!\n");
 			}
 
@@ -2530,10 +2529,110 @@ namespace SafeHook
 		}
 	};
 
-	// Use a thread to check for the difference wtihout freezing the main thread
-	// In development, this function flags any mov reg, imm instructions as modified, which flags it undone
-	// It is also to be known that this issue persists on applications that have dynamic base addresses
-	inline Vector<PatchDifference> InvokePatchDiff(const char *moduleName, bool *done = nullptr)
+	namespace detail
+	{
+		inline size_t RvaToFileOffset(const IMAGE_NT_HEADERS* ntHeaders, DWORD rva)
+		{
+			const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(ntHeaders);
+			for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i, ++section)
+			{
+				DWORD size = section->Misc.VirtualSize ? section->Misc.VirtualSize : section->SizeOfRawData;
+				if (rva >= section->VirtualAddress && rva < section->VirtualAddress + size)
+				{
+					DWORD offsetInSection = rva - section->VirtualAddress;
+					if (offsetInSection < section->SizeOfRawData)
+						return static_cast<size_t>(section->PointerToRawData) + offsetInSection;
+					return SIZE_MAX;
+				}
+			}
+			return SIZE_MAX;
+		}
+
+		inline void ApplyBaseRelocations(Vector<unsigned char>& diskBuffer, IMAGE_NT_HEADERS* ntHeaders, uintptr_t memBase)
+		{
+			intptr_t delta = static_cast<intptr_t>(memBase) - static_cast<intptr_t>(ntHeaders->OptionalHeader.ImageBase);
+			if (delta == 0)
+				return;
+
+			if (ntHeaders->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_BASERELOC)
+				return;
+
+			const IMAGE_DATA_DIRECTORY& relocDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+			if (relocDir.VirtualAddress == 0 || relocDir.Size < sizeof(IMAGE_BASE_RELOCATION))
+				return;
+
+			size_t relocFileOffset = RvaToFileOffset(ntHeaders, relocDir.VirtualAddress);
+			if (relocFileOffset == SIZE_MAX || relocFileOffset + relocDir.Size > diskBuffer.size())
+				return;
+
+			size_t processed = 0;
+			while (processed + sizeof(IMAGE_BASE_RELOCATION) <= relocDir.Size)
+			{
+				auto* block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(diskBuffer.data() + relocFileOffset + processed);
+				if (block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || processed + block->SizeOfBlock > relocDir.Size)
+					break;
+
+				size_t entryCount = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+				const WORD* entries = reinterpret_cast<const WORD*>(block + 1);
+
+				for (size_t i = 0; i < entryCount; ++i)
+				{
+					WORD type = entries[i] >> 12;
+					WORD offset = entries[i] & 0x0FFF;
+
+					if (type == IMAGE_REL_BASED_ABSOLUTE)
+						continue;
+
+					size_t targetFileOffset = RvaToFileOffset(ntHeaders, block->VirtualAddress + offset);
+					if (targetFileOffset == SIZE_MAX)
+						continue;
+
+					if (type == IMAGE_REL_BASED_DIR64)
+					{
+						if (targetFileOffset + sizeof(uint64_t) <= diskBuffer.size())
+						{
+							auto* ptr = reinterpret_cast<uint64_t*>(diskBuffer.data() + targetFileOffset);
+							*ptr = static_cast<uint64_t>(static_cast<int64_t>(*ptr) + delta);
+						}
+					}
+					else if (type == IMAGE_REL_BASED_HIGHLOW)
+					{
+						if (targetFileOffset + sizeof(uint32_t) <= diskBuffer.size())
+						{
+							auto* ptr = reinterpret_cast<uint32_t*>(diskBuffer.data() + targetFileOffset);
+							*ptr = static_cast<uint32_t>(static_cast<int32_t>(*ptr) + static_cast<int32_t>(delta));
+						}
+					}
+				}
+
+				processed += block->SizeOfBlock;
+			}
+		}
+
+		inline bool HasAVX2Support()
+		{
+			int cpuInfo[4] = { 0 };
+			__cpuidex(cpuInfo, 0, 0);
+			if (cpuInfo[0] < 7)
+				return false;
+
+			__cpuidex(cpuInfo, 1, 0);
+			bool osxsave = (cpuInfo[2] & (1 << 27)) != 0;
+			bool avx = (cpuInfo[2] & (1 << 28)) != 0;
+			if (!osxsave || !avx)
+				return false;
+
+			unsigned long long xcrFeatureMask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
+			if ((xcrFeatureMask & 0x6) != 0x6)
+				return false;
+
+			__cpuidex(cpuInfo, 7, 0);
+			bool avx2 = (cpuInfo[1] & (1 << 5)) != 0;
+			return avx2;
+		}
+	}
+
+	inline Vector<PatchDifference> InvokePatchDiff(const char* moduleName, bool* done = nullptr)
 	{
 		Vector<PatchDifference> differences;
 
@@ -2546,7 +2645,7 @@ namespace SafeHook
 		HMODULE hModule = GetModuleHandleA(moduleName);
 		if (!hModule) return finish(differences);
 
-		MODULEINFO moduleInfo;
+		MODULEINFO moduleInfo{};
 		if (!GetModuleInformation(GetCurrentProcess(), hModule, &moduleInfo, sizeof(moduleInfo)))
 			return finish(differences);
 
@@ -2564,43 +2663,49 @@ namespace SafeHook
 
 			if (fileSize > 0)
 			{
-				diskBuffer.resize(fileSize);
-				size_t bytesRead = fread(diskBuffer.data(), 1, fileSize, file);
-				if (bytesRead != (size_t)fileSize)
+				diskBuffer.resize(static_cast<size_t>(fileSize));
+				size_t bytesRead = fread(diskBuffer.data(), 1, static_cast<size_t>(fileSize), file);
+				if (bytesRead != static_cast<size_t>(fileSize))
 					diskBuffer.clear();
 			}
 			fclose(file);
 		}
 
-		if (diskBuffer.empty()) return finish(differences);
-
-		auto* dosHeader = (IMAGE_DOS_HEADER*)diskBuffer.data();
-		if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE ||
-			dosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS) > diskBuffer.size())
+		if (diskBuffer.size() < sizeof(IMAGE_DOS_HEADER))
 			return finish(differences);
+
+		auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(diskBuffer.data());
+		if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE ||
+			dosHeader->e_lfanew < 0 ||
+			static_cast<size_t>(dosHeader->e_lfanew) + sizeof(IMAGE_NT_HEADERS) > diskBuffer.size())
+		{
+			return finish(differences);
+		}
 
 		auto* ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS*>(diskBuffer.data() + dosHeader->e_lfanew);
 		if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
 			return finish(differences);
 
-		uintptr_t memBase = reinterpret_cast<uintptr_t>(moduleInfo.lpBaseOfDll);
 		auto* sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+		size_t sectionsEndOffset = reinterpret_cast<unsigned char*>(sectionHeaders + ntHeaders->FileHeader.NumberOfSections) - diskBuffer.data();
+		if (sectionsEndOffset > diskBuffer.size())
+			return finish(differences);
 
-		int cpuInfo[4] = { 0 };
-		__cpuidex(cpuInfo, 1, 0);
-		
-		bool osxsave = cpuInfo[2] & (1 << 27);
-		bool avxSupport = (cpuInfo[2] & (1 << 28));
+		uintptr_t memBase = reinterpret_cast<uintptr_t>(moduleInfo.lpBaseOfDll);
 
-		bool ymmSave = false;
+		// Relocate the on-disk image in memory so ASLR-adjusted addresses match the live module
+		detail::ApplyBaseRelocations(diskBuffer, ntHeaders, memBase);
 
-		if (osxsave && avxSupport)
+		// Determine IAT RVA range in case the IAT sits inside an executable/code section
+		DWORD iatRva = 0;
+		DWORD iatSize = 0;
+		if (ntHeaders->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IAT)
 		{
-			unsigned long long xcrFeatureMask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
-			ymmSave = (xcrFeatureMask & 0x6) == 0x6;
+			iatRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].VirtualAddress;
+			iatSize = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].Size;
 		}
 
-		bool useAVX = osxsave && avxSupport && ymmSave;
+		const bool useAVX2 = detail::HasAVX2Support();
 
 		for (WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; ++i)
 		{
@@ -2616,22 +2721,22 @@ namespace SafeHook
 			if (compareSize == 0)
 				continue;
 
-			if (sec.PointerToRawData + compareSize > diskBuffer.size())
+			if (static_cast<size_t>(sec.PointerToRawData) + compareSize > diskBuffer.size())
 				continue;
 
 			const unsigned char* diskSec = diskBuffer.data() + sec.PointerToRawData;
-			const unsigned char* memSec = (const unsigned char*)(memBase + sec.VirtualAddress);
+			const unsigned char* memSec = reinterpret_cast<const unsigned char*>(memBase + sec.VirtualAddress);
 
 			size_t offset = 0;
 
 			while (offset < compareSize)
 			{
-				if (useAVX)
+				if (useAVX2)
 				{
 					while (offset + sizeof(__m256i) <= compareSize)
 					{
-						__m256i orig = _mm256_loadu_si256((__m256i*)(diskSec + offset));
-						__m256i mod = _mm256_loadu_si256((__m256i*)(memSec + offset));
+						__m256i orig = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(diskSec + offset));
+						__m256i mod = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(memSec + offset));
 						__m256i diff = _mm256_xor_si256(orig, mod);
 
 						if (!_mm256_testz_si256(diff, diff))
@@ -2644,8 +2749,8 @@ namespace SafeHook
 				{
 					while (offset + sizeof(__m128i) <= compareSize)
 					{
-						__m128i orig = _mm_loadu_si128((__m128i*)(diskSec + offset));
-						__m128i mod = _mm_loadu_si128((__m128i*)(memSec + offset));
+						__m128i orig = _mm_loadu_si128(reinterpret_cast<const __m128i*>(diskSec + offset));
+						__m128i mod = _mm_loadu_si128(reinterpret_cast<const __m128i*>(memSec + offset));
 						__m128i diff = _mm_xor_si128(orig, mod);
 
 						if (!_mm_testz_si128(diff, diff))
@@ -2671,6 +2776,11 @@ namespace SafeHook
 				}
 
 				size_t patchLength = offset - patchStart;
+				DWORD patchRva = sec.VirtualAddress + static_cast<DWORD>(patchStart);
+
+				// Skip differences that fall completely inside the Import Address Table
+				if (iatSize > 0 && patchRva >= iatRva && (patchRva + patchLength) <= (iatRva + iatSize))
+					continue;
 
 				Vector<unsigned char> original;
 				Vector<unsigned char> modified;
@@ -2682,7 +2792,7 @@ namespace SafeHook
 				memcpy(modified.data(), memSec + patchStart, patchLength);
 
 				differences.push_back({
-					SafeAddress((uintptr_t)(memSec + patchStart)),
+					SafeAddress(reinterpret_cast<uintptr_t>(memSec + patchStart)),
 					original,
 					modified
 				});
@@ -3592,7 +3702,11 @@ namespace SafeHook
 				CreateTrampoline();
 
 				if (pOriginal)
+				{
+					assert(*pOriginal == nullptr && "pOriginal must be nullptr");
+					// you must pass it as `(void**)&pOriginal`, not `&pOriginal`, `(void*)pOriginal` nor `pOriginal`, passing not as intended may lead to a nullified pointer to a original, which would cause access violation at 0
 					*pOriginal = m_trampoline;
+				}
 
 				if (bEnable)
 					Enable();
@@ -3621,7 +3735,11 @@ namespace SafeHook
 				m_hook = (unsigned char*)pHook;
 				CreateTrampoline();
 				if (pOriginal)
+				{
+					assert(*pOriginal == nullptr && "pOriginal must be nullptr");
+					// you must pass it as `(void**)&pOriginal`, not `&pOriginal`, `(void*)pOriginal` nor `pOriginal`, passing not as intended may lead to a nullified pointer to a original, which would cause access violation at 0
 					*pOriginal = m_trampoline;
+				}
 
 				Enable();
 
@@ -3659,7 +3777,7 @@ namespace SafeHook
 		{
 			try
 			{
-				Create(pTarget, pHook, true, pOriginal);
+				Create(pTarget, pHook, pOriginal);
 			}
 			catch (const SafeHook::Exception& e)
 			{
@@ -3929,7 +4047,7 @@ namespace SafeHook
 
 	SAFEHOOK_FORCEINLINE void SetFlags(RFLAGS flags)
 	{
-		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x48i8, 0x31i8, 0xC0i8, 0x48i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfq; xor rax, rax; mov [rsp], rcx; popfq; ret
+		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x48i8, 0x89i8, 0x0Ci8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfq; mov [rsp], rcx; popfq; ret
 
 		return ((void(__fastcall*)(unsigned long long))(void*)fnc)(flags.i64);
 	}
@@ -3943,7 +4061,7 @@ namespace SafeHook
 
 	SAFEHOOK_FORCEINLINE void SetFlags(EFLAGS flags)
 	{
-		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x31i8, 0xC0i8, 0x8Bi8, 0x04i8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; xor eax, eax; mov [esp], ecx; popfd; ret
+		__declspec(allocate(".text")) static char fnc[] = { 0x9Ci8, 0x89i8, 0x0Ci8, 0x24i8, 0x9Di8, 0xC3i8 }; // pushfd; mov [esp], ecx; popfd; ret
 
 		return ((void(__fastcall*)(int))(void*)fnc)(flags.i32);
 	}
